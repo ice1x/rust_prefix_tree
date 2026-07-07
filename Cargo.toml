@@ -1,0 +1,42 @@
+[package]
+name = "geo_trie_rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Memory-mapped, fst-backed geo autocomplete index for the reviews service, exposed to Python via PyO3."
+license = "Apache-2.0"
+repository = "https://github.com/ice1x/rust_prefix_tree"
+readme = "README.md"
+
+# cdylib -> the PyO3 extension module (built with maturin).
+# rlib   -> lets `cargo test`, benches and the `build-index` binary link the core.
+[lib]
+name = "geo_trie_rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "build-index"
+path = "src/bin/build_index.rs"
+
+[features]
+# Default build is pure Rust so `cargo test` / `cargo clippy` need no Python.
+default = []
+# Enable the PyO3 extension module (used by maturin).
+python = ["dep:pyo3"]
+
+[dependencies]
+fst = "0.4"
+memmap2 = "0.9"
+unicode-normalization = "0.1"
+
+[dependencies.pyo3]
+version = "0.22"
+features = ["extension-module", "abi3-py39"]
+optional = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1

@@ -1,0 +1,8 @@
+# gid	name	lat	lon	country	population	feature_code	keys
+2950159	Berlin	52.52437	13.41053	DE	3426354	PPLC	Berlin|Berlín|Берлин
+2661552	Bern	46.94809	7.44744	CH	121631	PPLC	Bern|Berne|Берн
+3161732	Bergen	60.39299	5.32415	NO	213585	PPL	Bergen
+2988507	Paris	48.85341	2.3488	FR	2138551	PPLC	Paris|París|Париж
+5128581	New York City	40.71427	-74.00597	US	8175133	PPL	New York|New York City|NYC
+524901	Moscow	55.75222	37.61556	RU	10381222	PPLC	Moscow|Moskva|Москва
+3143244	Solnechnogorsk	56.18389	36.98194	RU	52798	PPL	Solnechnogorsk|Солнечногорск
