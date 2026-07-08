@@ -17,7 +17,7 @@ use std::io::{self, BufRead};
 use std::path::Path;
 use std::process::ExitCode;
 
-use geo_trie_rs::{normalize, IndexBuilder, Record};
+use geo_trie_rs::{normalize, GeoRecord, IndexBuilder};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -60,7 +60,7 @@ fn run(input: &str, out_dir: &str) -> io::Result<(usize, usize, usize, usize)> {
             )
         })?;
         let name = record.name.clone();
-        let id = builder.add_record(record);
+        let id = builder.add_record(record.to_record());
         record_count += 1;
 
         let mut linked = 0usize;
@@ -90,8 +90,8 @@ fn run(input: &str, out_dir: &str) -> io::Result<(usize, usize, usize, usize)> {
     Ok((key_count, record_count, fst_bytes.len(), rec_bytes.len()))
 }
 
-/// Parse one TSV line into a record plus its raw (un-normalized) alias keys.
-fn parse_line(line: &str) -> Result<(Record, Vec<&str>), String> {
+/// Parse one TSV line into a geo record plus its raw (un-normalized) alias keys.
+fn parse_line(line: &str) -> Result<(GeoRecord, Vec<&str>), String> {
     let cols: Vec<&str> = line.split('\t').collect();
     if cols.len() < 7 {
         return Err(format!(
@@ -115,7 +115,7 @@ fn parse_line(line: &str) -> Result<(Record, Vec<&str>), String> {
     };
 
     Ok((
-        Record {
+        GeoRecord {
             gid,
             lat,
             lon,

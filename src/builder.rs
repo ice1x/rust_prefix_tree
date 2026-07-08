@@ -13,6 +13,9 @@ use fst::MapBuilder;
 
 use crate::records::{Record, HEADER_LEN, MAGIC};
 
+// Record payload serialization lives here; string packing helpers are shared from
+// `records` so domain adapters and the builder agree on the encoding.
+
 /// Accumulates records and key→record links, then emits `(fst, records)` bytes.
 #[derive(Default)]
 pub struct IndexBuilder {
@@ -82,13 +85,10 @@ fn serialize_records(postings: &[Vec<u32>], records: &[Record]) -> Vec<u8> {
     let mut rec_idx = Vec::with_capacity(records.len() + 1);
     for r in records {
         rec_idx.push(rec_pay.len() as u64);
-        rec_pay.extend_from_slice(&r.gid.to_le_bytes());
-        rec_pay.extend_from_slice(&r.lat.to_bits().to_le_bytes());
-        rec_pay.extend_from_slice(&r.lon.to_bits().to_le_bytes());
-        rec_pay.extend_from_slice(&(r.population as u64).to_le_bytes());
-        push_str(&mut rec_pay, &r.country);
-        push_str(&mut rec_pay, &r.feature_code);
-        push_str(&mut rec_pay, &r.name);
+        rec_pay.extend_from_slice(&r.group.to_le_bytes());
+        rec_pay.extend_from_slice(&(r.rank as u64).to_le_bytes());
+        rec_pay.extend_from_slice(&(r.payload.len() as u32).to_le_bytes());
+        rec_pay.extend_from_slice(&r.payload);
     }
     rec_idx.push(rec_pay.len() as u64);
 
@@ -119,13 +119,6 @@ fn serialize_records(postings: &[Vec<u32>], records: &[Record]) -> Vec<u8> {
     out.extend_from_slice(&rec_pay);
     debug_assert_eq!(out.len() as u64, total_len);
     out
-}
-
-fn push_str(buf: &mut Vec<u8>, s: &str) {
-    let bytes = s.as_bytes();
-    let len = u16::try_from(bytes.len()).expect("string field exceeds 65535 bytes");
-    buf.extend_from_slice(&len.to_le_bytes());
-    buf.extend_from_slice(bytes);
 }
 
 #[cfg(test)]

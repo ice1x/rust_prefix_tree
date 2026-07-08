@@ -265,16 +265,34 @@ The core described above is built as the `geo_trie_rs` crate. It is pure Rust by
 default (so `cargo test` / `cargo clippy` need no Python); the PyO3 extension module
 is gated behind the `python` cargo feature and produced as an abi3 wheel by maturin.
 
+### Domain-agnostic core + adapters
+
+The engine is **not tied to geo**. Geo is one adapter over a neutral core; a people
+index (ФИО), a product catalog, etc. are just other adapters — nothing in the core
+changes. The core stores each item as three neutral fields:
+
+| Geo meaning | Core field | People (ФИО) example |
+|---|---|---|
+| `gid` | `group: u64` — dedup key (same group kept once) | person id |
+| `population` | `rank: i64` — sort weight, higher first | relevance / recency score |
+| `lat/lon/country/…` | `payload: Vec<u8>` — opaque bytes the core never reads | `"Surname\|Dept"`, JSON, bincode, … |
+
+So the core contract is: *normalized key → set of `(rank, group, payload)`*, and a
+domain adapter encodes/decodes its own `payload`. See `src/geo.rs` for the geo
+adapter and the `people_index_is_just_another_adapter` integration test for a second
+domain built on the same `Index`/`IndexBuilder`.
+
 ### Crate layout
 
 | File | Role |
 |---|---|
 | `src/normalize.rs` | `normalize()` — NFKD, drop combining marks, lowercase, collapse separators; idempotent. Mirrors the Python folding (§5, §10). |
-| `src/records.rs`   | `records.bin` reader (`RecordStore`, `Record`) — postings + per-place metadata, offset-indexed for O(1) access, works over `Vec<u8>` or `Mmap`. |
+| `src/records.rs`   | `records.bin` reader (`RecordStore`, neutral `Record { group, rank, payload }`), offset-indexed for O(1) access, works over `Vec<u8>` or `Mmap`. **Domain-agnostic.** |
 | `src/builder.rs`   | `IndexBuilder` — groups `(key, record_id)` pairs into postings and emits `(index.fst, records.bin)` bytes. Keys deduped-sorted for `fst::MapBuilder`. |
-| `src/index.rs`     | `Index` — mmaps both artifacts (`Index::open`) and serves `suggest(prefix, limit)`: prefix scan → dedup by gid → rank by population → truncate. |
-| `src/python.rs`    | PyO3 module `geo_trie_rs` (`Index.open`, `Index.suggest`, `normalize`), feature = `python`. |
-| `src/bin/build_index.rs` | `build-index <input.tsv> <out_dir>` CLI. |
+| `src/index.rs`     | `Index` — mmaps both artifacts (`Index::open`) and serves `suggest(prefix, limit)`: prefix scan → dedup by `group` → rank by `rank` → truncate. **Domain-agnostic.** |
+| `src/geo.rs`       | **Geo adapter** — `GeoRecord` ↔ `Record` (`to_record`/`from_record`) and the typed `Index::suggest_geo`. The only geo-aware code. |
+| `src/python.rs`    | PyO3 module `geo_trie_rs` (`Index.open`, `Index.suggest` → `(rank, group, bytes)`, `geo_unpack`, `normalize`), feature = `python`. |
+| `src/bin/build_index.rs` | `build-index <input.tsv> <out_dir>` CLI (uses the geo adapter). |
 
 The `records.bin` binary layout is documented at the top of `src/records.rs`.
 
@@ -296,8 +314,18 @@ use geo_trie_rs::Index;
 use memmap2::Mmap;
 
 let idx = Index::<Mmap>::open("geo-index/index.fst", "geo-index/records.bin")?;
-for r in idx.suggest("berl", 8)? {
+
+// Geo-typed convenience (decodes the payload for you):
+for r in idx.suggest_geo("berl", 8)? {
     println!("{} ({}) pop={}", r.name, r.country, r.population);
+}
+
+// Or the agnostic core: neutral Record { group, rank, payload } — decode payload
+// yourself. This is what a non-geo adapter uses.
+for r in idx.suggest("berl", 8)? {
+    let (rank, group, bytes) = (r.rank, r.group, r.payload);
+    // ... your own decode ...
+    let _ = (rank, group, bytes);
 }
 ```
 
@@ -311,14 +339,20 @@ pip install dist/geo_trie_rs-*.whl
 ```python
 import geo_trie_rs
 idx = geo_trie_rs.Index.open("geo-index/index.fst", "geo-index/records.bin")
-# rows: list[(gid, name, lat, lon, country, population, feature_code)]
-rows = idx.suggest("berl", limit=8)
+
+# The agnostic API returns (rank, group, payload_bytes) triples:
+for rank, group, payload in idx.suggest("berl", limit=8):
+    # For a geo-built index, geo_unpack decodes the 7-tuple:
+    gid, name, lat, lon, country, population, feature_code = \
+        geo_trie_rs.geo_unpack(rank, group, payload)
+
 # Fold queries identically to the index (idempotent, matches the Python normalizer):
 key = geo_trie_rs.normalize("Zürich-HB")   # -> "zurich hb"
 ```
 
-This drops in behind `RustGeoIndex` (§5): the wrapper maps each returned tuple to a
-`GeoRecord`, keeping the `/geo/suggest` contract unchanged.
+This drops in behind `RustGeoIndex` (§5): the wrapper maps each row to a
+`GeoRecord`, keeping the `/geo/suggest` contract unchanged. A different domain skips
+`geo_unpack` and decodes its own payload bytes.
 
 ### Not yet built
 

@@ -1,12 +1,16 @@
 //! Query side: memory-map `index.fst` + `records.bin` and serve prefix
 //! autocomplete (README §4, §5).
 //!
+//! The engine is **domain-agnostic** — it returns neutral [`Record`]s
+//! (`group`/`rank`/`payload`). A domain adapter such as [`crate::geo`] decodes the
+//! payload; see [`Index::suggest`].
+//!
 //! `suggest(prefix, limit)`:
 //! 1. normalize the prefix (idempotent — safe even if the caller pre-normalized),
 //! 2. run a `StartsWith` automaton over the FST (a range scan),
 //! 3. expand matched FST values → postings → record ids,
-//! 4. dedup by record id then by GeoNames `gid`,
-//! 5. rank by population desc (name asc as a stable tiebreak) and take `limit`.
+//! 4. dedup by record id then by `group`,
+//! 5. rank by `rank` desc (payload asc as a deterministic tiebreak) and take `limit`.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -20,8 +24,8 @@ use memmap2::Mmap;
 use crate::normalize::normalize;
 use crate::records::{Record, RecordStore};
 
-/// A read-only geo index over some byte backing store `B` (an owned `Vec<u8>` in
-/// tests, a `memmap2::Mmap` in production).
+/// A read-only autocomplete index over some byte backing store `B` (an owned
+/// `Vec<u8>` in tests, a `memmap2::Mmap` in production).
 pub struct Index<B: AsRef<[u8]>> {
     map: Map<B>,
     store: RecordStore<B>,
@@ -70,7 +74,10 @@ impl<B: AsRef<[u8]>> Index<B> {
     }
 
     /// Autocomplete: records whose normalized key starts with `prefix`, deduped by
-    /// GeoNames id, ranked by population descending, truncated to `limit`.
+    /// `group`, ranked by `rank` descending, truncated to `limit`.
+    ///
+    /// Returns neutral [`Record`]s; decode `payload` with your domain adapter (e.g.
+    /// [`crate::geo::GeoRecord::from_record`]).
     pub fn suggest(&self, prefix: &str, limit: usize) -> io::Result<Vec<Record>> {
         let norm = normalize(prefix);
         if norm.is_empty() || limit == 0 {
@@ -91,22 +98,18 @@ impl<B: AsRef<[u8]>> Index<B> {
             }
         }
 
-        // Hydrate + dedup by gid.
-        let mut seen_gid: HashSet<u64> = HashSet::new();
+        // Hydrate + dedup by group.
+        let mut seen_group: HashSet<u64> = HashSet::new();
         let mut out: Vec<Record> = Vec::with_capacity(record_ids.len());
         for rid in record_ids {
             let r = self.store.record(rid)?;
-            if seen_gid.insert(r.gid) {
+            if seen_group.insert(r.group) {
                 out.push(r);
             }
         }
 
-        // Rank: population desc, name asc as a deterministic tiebreak.
-        out.sort_by(|a, b| {
-            b.population
-                .cmp(&a.population)
-                .then_with(|| a.name.cmp(&b.name))
-        });
+        // Rank: rank desc, payload asc as a deterministic tiebreak.
+        out.sort_by(|a, b| b.rank.cmp(&a.rank).then_with(|| a.payload.cmp(&b.payload)));
         out.truncate(limit);
         Ok(out)
     }
@@ -117,32 +120,33 @@ mod tests {
     use super::*;
     use crate::builder::IndexBuilder;
 
-    fn rec(gid: u64, name: &str, pop: i64) -> Record {
+    fn rec(group: u64, rank: i64, payload: &str) -> Record {
         Record {
-            gid,
-            lat: 0.0,
-            lon: 0.0,
-            population: pop,
-            country: "XX".into(),
-            feature_code: "PPL".into(),
-            name: name.into(),
+            group,
+            rank,
+            payload: payload.as_bytes().to_vec(),
         }
     }
 
-    /// Build an index with a few overlapping-prefix places and shared aliases.
+    fn payload(r: &Record) -> &str {
+        std::str::from_utf8(&r.payload).unwrap()
+    }
+
+    /// Build an index with a few overlapping-prefix items and shared aliases.
+    /// Payload is just the display string; group is a stable item id; rank a weight.
     fn sample() -> Index<Vec<u8>> {
         let mut b = IndexBuilder::new();
-        let berlin = b.add_record(rec(1, "Berlin", 3_600_000));
-        let bern = b.add_record(rec(2, "Bern", 130_000));
-        let bergen = b.add_record(rec(3, "Bergen", 280_000));
-        let paris = b.add_record(rec(4, "Paris", 2_100_000));
+        let berlin = b.add_record(rec(1, 3_600_000, "Berlin"));
+        let bern = b.add_record(rec(2, 130_000, "Bern"));
+        let bergen = b.add_record(rec(3, 280_000, "Bergen"));
+        let paris = b.add_record(rec(4, 2_100_000, "Paris"));
 
-        // Each place indexed under its own normalized name...
+        // Each item indexed under its own normalized name...
         b.add_key("berlin", berlin);
         b.add_key("bern", bern);
         b.add_key("bergen", bergen);
         b.add_key("paris", paris);
-        // ...and an alias that several places share.
+        // ...and an alias that several items share.
         b.add_key("ber", berlin);
         b.add_key("ber", bern);
         b.add_key("ber", bergen);
@@ -152,11 +156,11 @@ mod tests {
     }
 
     #[test]
-    fn prefix_matches_and_ranks_by_population() {
+    fn prefix_matches_and_ranks_by_rank() {
         let idx = sample();
         let out = idx.suggest("ber", 10).unwrap();
-        let names: Vec<_> = out.iter().map(|r| r.name.as_str()).collect();
-        // Berlin (3.6M) > Bergen (280k) > Bern (130k); "ber" alias + "berlin"/"bergen"/"bern".
+        let names: Vec<_> = out.iter().map(payload).collect();
+        // Berlin (3.6M) > Bergen (280k) > Bern (130k).
         assert_eq!(names, vec!["Berlin", "Bergen", "Bern"]);
     }
 
@@ -165,8 +169,8 @@ mod tests {
         let idx = sample();
         let out = idx.suggest("ber", 2).unwrap();
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].name, "Berlin");
-        assert_eq!(out[1].name, "Bergen");
+        assert_eq!(payload(&out[0]), "Berlin");
+        assert_eq!(payload(&out[1]), "Bergen");
     }
 
     #[test]
@@ -174,15 +178,15 @@ mod tests {
         let idx = sample();
         let out = idx.suggest("berl", 10).unwrap();
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].name, "Berlin");
+        assert_eq!(payload(&out[0]), "Berlin");
     }
 
     #[test]
-    fn dedups_by_gid_across_alias_and_name() {
+    fn dedups_by_group_across_alias_and_name() {
         let idx = sample();
-        // "berlin" is reachable via both "ber" alias and "berlin" key; must appear once.
+        // "Berlin" is reachable via both "ber" alias and "berlin" key; must appear once.
         let out = idx.suggest("ber", 10).unwrap();
-        let berlins = out.iter().filter(|r| r.gid == 1).count();
+        let berlins = out.iter().filter(|r| r.group == 1).count();
         assert_eq!(berlins, 1);
     }
 

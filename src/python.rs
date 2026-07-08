@@ -4,12 +4,16 @@
 //! the pure-Rust [`crate::Index`] over a `memmap2::Mmap` so all uvicorn workers
 //! share one read-only copy of the artifacts via the OS page cache.
 //!
-//! Python surface:
+//! The exposed [`Index`] is **domain-agnostic**: `suggest` returns
+//! `(rank, group, payload_bytes)` triples and the caller decodes the payload. For
+//! the geo build, [`geo_unpack`] turns a triple into the familiar 7-tuple.
+//!
 //! ```python
 //! import geo_trie_rs
 //! idx = geo_trie_rs.Index.open("index.fst", "records.bin")
-//! # -> list[(gid, name, lat, lon, country, population, feature_code)]
-//! rows = idx.suggest("berl", 8)
+//! for rank, group, payload in idx.suggest("berl", 8):
+//!     gid, name, lat, lon, country, population, feature_code = \
+//!         geo_trie_rs.geo_unpack(rank, group, payload)
 //! ```
 
 // `useless_conversion` fires on `#[pymethods]`-macro-generated result conversions,
@@ -19,14 +23,20 @@
 use memmap2::Mmap;
 use pyo3::exceptions::PyIOError;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
+use crate::geo::GeoRecord;
 use crate::index::Index as CoreIndex;
+use crate::records::Record;
 
-/// A record row as returned to Python: `(gid, name, lat, lon, country, population,
-/// feature_code)`. Ordering matches the Python `GeoRecord` positional fields.
-type PyRow = (u64, String, f64, f64, String, i64, String);
+/// A neutral result row exposed to Python: `(rank, group, payload_bytes)`.
+type PyHit<'py> = (i64, u64, Bound<'py, PyBytes>);
 
-/// Memory-mapped geo index exposed to Python.
+/// The geo 7-tuple: `(gid, name, lat, lon, country, population, feature_code)`,
+/// matching the Python `GeoRecord` positional fields.
+type PyGeoRow = (u64, String, f64, f64, String, i64, String);
+
+/// Memory-mapped, domain-agnostic autocomplete index exposed to Python.
 #[pyclass]
 struct Index {
     inner: CoreIndex<Mmap>,
@@ -47,30 +57,48 @@ impl Index {
         self.inner.len() as usize
     }
 
-    /// Autocomplete: rows whose normalized key starts with `prefix`, deduped by
-    /// GeoNames id, ranked by population desc, truncated to `limit`.
+    /// Autocomplete: `(rank, group, payload_bytes)` rows whose normalized key starts
+    /// with `prefix`, deduped by `group`, ranked by `rank` desc, truncated to
+    /// `limit`. Decode `payload_bytes` with your domain adapter (e.g. `geo_unpack`).
     #[pyo3(signature = (prefix, limit = 8))]
-    fn suggest(&self, prefix: &str, limit: usize) -> PyResult<Vec<PyRow>> {
+    fn suggest<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: &str,
+        limit: usize,
+    ) -> PyResult<Vec<PyHit<'py>>> {
         self.inner
             .suggest(prefix, limit)
             .map(|records| {
                 records
                     .into_iter()
-                    .map(|r| {
-                        (
-                            r.gid,
-                            r.name,
-                            r.lat,
-                            r.lon,
-                            r.country,
-                            r.population,
-                            r.feature_code,
-                        )
-                    })
+                    .map(|r| (r.rank, r.group, PyBytes::new_bound(py, &r.payload)))
                     .collect()
             })
             .map_err(|e| PyIOError::new_err(e.to_string()))
     }
+}
+
+/// Decode a geo payload triple `(rank, group, payload)` (as returned by
+/// [`Index::suggest`] over a geo-built index) into the 7-tuple
+/// `(gid, name, lat, lon, country, population, feature_code)`.
+#[pyfunction]
+fn geo_unpack(rank: i64, group: u64, payload: &[u8]) -> PyResult<PyGeoRow> {
+    let record = Record {
+        group,
+        rank,
+        payload: payload.to_vec(),
+    };
+    let g = GeoRecord::from_record(&record).map_err(|e| PyIOError::new_err(e.to_string()))?;
+    Ok((
+        g.gid,
+        g.name,
+        g.lat,
+        g.lon,
+        g.country,
+        g.population,
+        g.feature_code,
+    ))
 }
 
 /// Normalize a string with the exact folding used at index-build time. Exposed so
@@ -83,6 +111,7 @@ fn normalize(input: &str) -> String {
 #[pymodule]
 fn geo_trie_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Index>()?;
+    m.add_function(wrap_pyfunction!(geo_unpack, m)?)?;
     m.add_function(wrap_pyfunction!(normalize, m)?)?;
     Ok(())
 }

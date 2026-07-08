@@ -1,13 +1,15 @@
-//! `records.bin` — the parallel, memory-mappable metadata blob (README §4).
+//! `records.bin` — the parallel, memory-mappable payload blob (README §4).
 //!
-//! It holds two sections, both indexed by a flat offset table so any entry can be
-//! read in O(1) without parsing what comes before it:
+//! The store is **domain-agnostic**: it knows nothing about geo. It holds two
+//! sections, both indexed by a flat offset table so any entry can be read in O(1)
+//! without parsing what comes before it:
 //!
 //! * **postings** — for each distinct FST value `j`, the list of record ids that
 //!   share that normalized key. The FST maps `key -> j`; a prefix scan yields a set
 //!   of `j`s, which expand to record ids here.
-//! * **records** — the per-place metadata (`gid, lat, lon, population, country,
-//!   feature_code, name`), indexed by record id.
+//! * **records** — per-item data indexed by record id, each a neutral triple:
+//!   `group` (dedup key), `rank` (sort weight, higher first) and an opaque
+//!   `payload` the caller's domain adapter encodes/decodes (see [`crate::geo`]).
 //!
 //! Layout (all little-endian), where every `*_off` is absolute from the start of
 //! the buffer:
@@ -25,58 +27,75 @@
 //! ```
 //!
 //! A postings entry is `u32 count` followed by `count` × `u32 record_id`.
-//! A record is `u64 gid | f64 lat | f64 lon | i64 population` then three
-//! length-prefixed (`u16 len` + bytes) UTF-8 strings: `country`, `feature_code`,
-//! `name`.
+//! A record is `u64 group | i64 rank | u32 payload_len | payload_bytes`.
 
 use std::io;
 
 pub const MAGIC: &[u8; 8] = b"GEOIDX01";
 pub const HEADER_LEN: usize = 56;
 
-/// A single place record, as returned by a query.
-#[derive(Debug, Clone, PartialEq)]
+/// A single stored record: a dedup `group`, a sort `rank`, and an opaque `payload`.
+///
+/// The core never interprets `payload`; a domain adapter (e.g. [`crate::geo`])
+/// decides its bytes. `group` dedups results (same group → kept once); `rank` orders
+/// them (descending). For geo these are `gid` and `population`; for a people index
+/// they might be a person id and a relevance score.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
-    pub gid: u64,
-    pub lat: f64,
-    pub lon: f64,
-    pub population: i64,
-    pub country: String,
-    pub feature_code: String,
-    pub name: String,
+    pub group: u64,
+    pub rank: i64,
+    pub payload: Vec<u8>,
 }
 
-fn err(msg: &str) -> io::Error {
+pub(crate) fn err(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-fn read_u16(buf: &[u8], at: usize) -> io::Result<u16> {
+pub(crate) fn read_u16(buf: &[u8], at: usize) -> io::Result<u16> {
     let b = buf
         .get(at..at + 2)
         .ok_or_else(|| err("u16 out of bounds"))?;
     Ok(u16::from_le_bytes([b[0], b[1]]))
 }
 
-fn read_u32(buf: &[u8], at: usize) -> io::Result<u32> {
+pub(crate) fn read_u32(buf: &[u8], at: usize) -> io::Result<u32> {
     let b = buf
         .get(at..at + 4)
         .ok_or_else(|| err("u32 out of bounds"))?;
     Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
-fn read_u64(buf: &[u8], at: usize) -> io::Result<u64> {
+pub(crate) fn read_u64(buf: &[u8], at: usize) -> io::Result<u64> {
     let b = buf
         .get(at..at + 8)
         .ok_or_else(|| err("u64 out of bounds"))?;
     Ok(u64::from_le_bytes(b.try_into().unwrap()))
 }
 
-fn read_i64(buf: &[u8], at: usize) -> io::Result<i64> {
+pub(crate) fn read_i64(buf: &[u8], at: usize) -> io::Result<i64> {
     Ok(read_u64(buf, at)? as i64)
 }
 
-fn read_f64(buf: &[u8], at: usize) -> io::Result<f64> {
-    Ok(f64::from_bits(read_u64(buf, at)?))
+/// Read a `u16`-length-prefixed UTF-8 string at `at`; returns `(string, next_off)`.
+/// Shared by domain adapters that pack strings into a payload.
+pub(crate) fn read_str(buf: &[u8], at: usize) -> io::Result<(String, usize)> {
+    let len = read_u16(buf, at)? as usize;
+    let start = at + 2;
+    let bytes = buf
+        .get(start..start + len)
+        .ok_or_else(|| err("string out of bounds"))?;
+    let s = std::str::from_utf8(bytes)
+        .map_err(|_| err("string not utf-8"))?
+        .to_owned();
+    Ok((s, start + len))
+}
+
+/// Append a `u16`-length-prefixed UTF-8 string. Shared by the builder and adapters.
+pub(crate) fn push_str(buf: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    let len = u16::try_from(bytes.len()).expect("string field exceeds 65535 bytes");
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(bytes);
 }
 
 /// Read-only view over a `records.bin` buffer. Generic over the backing store so it
@@ -159,43 +178,23 @@ impl<B: AsRef<[u8]>> RecordStore<B> {
         let slot = self.rec_idx_off as usize + id as usize * 8;
         let mut at = (self.rec_pay_off + read_u64(buf, slot)?) as usize;
 
-        let gid = read_u64(buf, at)?;
+        let group = read_u64(buf, at)?;
         at += 8;
-        let lat = read_f64(buf, at)?;
+        let rank = read_i64(buf, at)?;
         at += 8;
-        let lon = read_f64(buf, at)?;
-        at += 8;
-        let population = read_i64(buf, at)?;
-        at += 8;
-
-        let (country, next) = read_str(buf, at)?;
-        at = next;
-        let (feature_code, next) = read_str(buf, at)?;
-        at = next;
-        let (name, _next) = read_str(buf, at)?;
+        let len = read_u32(buf, at)? as usize;
+        at += 4;
+        let payload = buf
+            .get(at..at + len)
+            .ok_or_else(|| err("payload out of bounds"))?
+            .to_vec();
 
         Ok(Record {
-            gid,
-            lat,
-            lon,
-            population,
-            country,
-            feature_code,
-            name,
+            group,
+            rank,
+            payload,
         })
     }
-}
-
-fn read_str(buf: &[u8], at: usize) -> io::Result<(String, usize)> {
-    let len = read_u16(buf, at)? as usize;
-    let start = at + 2;
-    let bytes = buf
-        .get(start..start + len)
-        .ok_or_else(|| err("string out of bounds"))?;
-    let s = std::str::from_utf8(bytes)
-        .map_err(|_| err("string not utf-8"))?
-        .to_owned();
-    Ok((s, start + len))
 }
 
 #[cfg(test)]
@@ -203,23 +202,19 @@ mod tests {
     use super::*;
     use crate::builder::IndexBuilder;
 
-    fn rec(gid: u64, name: &str, pop: i64) -> Record {
+    fn rec(group: u64, rank: i64, payload: &str) -> Record {
         Record {
-            gid,
-            lat: 1.5,
-            lon: -2.5,
-            population: pop,
-            country: "DE".into(),
-            feature_code: "PPL".into(),
-            name: name.into(),
+            group,
+            rank,
+            payload: payload.as_bytes().to_vec(),
         }
     }
 
     // Build a tiny records.bin through the real builder and read it back.
     fn roundtrip() -> RecordStore<Vec<u8>> {
         let mut b = IndexBuilder::new();
-        let a = b.add_record(rec(101, "Berlin", 3_600_000));
-        let c = b.add_record(rec(202, "Bern", 130_000));
+        let a = b.add_record(rec(101, 3_600_000, "Berlin"));
+        let c = b.add_record(rec(202, 130_000, "Bern"));
         b.add_key("berlin", a);
         b.add_key("bern", c);
         // shared alias key -> both records
@@ -233,8 +228,8 @@ mod tests {
     fn reads_records_back() {
         let store = roundtrip();
         assert_eq!(store.n_records(), 2);
-        assert_eq!(store.record(0).unwrap(), rec(101, "Berlin", 3_600_000));
-        assert_eq!(store.record(1).unwrap(), rec(202, "Bern", 130_000));
+        assert_eq!(store.record(0).unwrap(), rec(101, 3_600_000, "Berlin"));
+        assert_eq!(store.record(1).unwrap(), rec(202, 130_000, "Bern"));
     }
 
     #[test]
