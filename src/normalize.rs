@@ -1,21 +1,29 @@
 //! Key normalization for the geo index.
 //!
 //! This mirrors the Python `normalize()` contract used by the pure-Python trie so
-//! that index-build folding and query folding agree exactly (see README §5, §10):
+//! that index-build folding and query folding agree exactly (see README §5, §10).
+//! Each character (after NFKD) falls into exactly one of three classes, matching
+//! the Python normalizer's `_SEPARATORS = " -.,()/"`:
 //!
 //! 1. NFKD decomposition,
 //! 2. drop combining marks (accents/diacritics),
 //! 3. lowercase,
-//! 4. collapse any run of separators (whitespace, `-`, `_`, `/`, `,`, `.`) into a
-//!    single ASCII space, and trim leading/trailing spaces.
+//! 4. **alphanumeric** → keep; **separator** (whitespace, `-`, `.`, `,`, `(`, `)`,
+//!    `/`) → collapse runs to a single ASCII space; **anything else** (apostrophes,
+//!    quotes, `_`, other punctuation) → drop with no space. Trim the edges.
+//!
+//! Dropping (not spacing) apostrophes/quotes is what keeps byte-for-byte parity
+//! with Python: `O'Brien -> obrien`, `St. John's -> st johns` (see issue #4).
 //!
 //! The function is **idempotent**: `normalize(normalize(s)) == normalize(s)`.
 
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 /// Characters that are treated as separators and collapsed to a single space.
+/// Matches the Python normalizer's `_SEPARATORS = " -.,()/"` (whitespace generalizes
+/// the space). Note: `_`, `'`, `"` are deliberately NOT here — they are dropped.
 fn is_separator(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '-' | '_' | '/' | ',' | '.' | '\'' | '"' | '(' | ')')
+    c.is_whitespace() || matches!(c, '-' | '.' | ',' | '(' | ')' | '/')
 }
 
 /// Normalize a raw place/query string into its canonical index key form.
@@ -30,22 +38,22 @@ pub fn normalize(input: &str) -> String {
         .collect::<String>()
         .to_lowercase();
 
-    // Collapse separator runs to a single space and trim.
     let mut out = String::with_capacity(decomposed.len());
     let mut pending_space = false;
     for c in decomposed.chars() {
-        if is_separator(c) {
+        if c.is_alphanumeric() {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(c);
+        } else if is_separator(c) {
             // Only emit a space if we already have real content buffered.
             if !out.is_empty() {
                 pending_space = true;
             }
-            continue;
         }
-        if pending_space {
-            out.push(' ');
-            pending_space = false;
-        }
-        out.push(c);
+        // else: non-alnum, non-separator (apostrophe, quote, `_`, …) -> dropped.
     }
     out
 }
@@ -72,9 +80,21 @@ mod tests {
     #[test]
     fn collapses_separators() {
         assert_eq!(normalize("New---York"), "new york");
-        assert_eq!(normalize("a_b/c,d.e"), "a b c d e");
+        // `_` is NOT a separator (matches Python) -> dropped, not spaced.
+        assert_eq!(normalize("a_b/c,d.e"), "ab c d e");
         assert_eq!(normalize("  spaced   out  "), "spaced out");
         assert_eq!(normalize("Saint-Étienne"), "saint etienne");
+    }
+
+    #[test]
+    fn apostrophes_and_quotes_are_dropped_not_spaced() {
+        // Issue #4: match the Python contract — `'`/`"` are removed with no space.
+        assert_eq!(normalize("O'Brien"), "obrien");
+        assert_eq!(normalize("St. John's"), "st johns");
+        assert_eq!(normalize("N'Djamena"), "ndjamena");
+        assert_eq!(normalize("Val-d'Or"), "val dor"); // hyphen spaces, apostrophe drops
+        assert_eq!(normalize("\"Quoted\""), "quoted");
+        assert_eq!(normalize("St. John's (Town)"), "st johns town");
     }
 
     #[test]
@@ -111,7 +131,6 @@ mod tests {
     fn collapses_mixed_and_repeated_separators() {
         assert_eq!(normalize("a  -_/,. b"), "a b");
         assert_eq!(normalize("(New) York"), "new york");
-        assert_eq!(normalize("O'Brien"), "o brien");
     }
 
     #[test]

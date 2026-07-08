@@ -12,7 +12,7 @@
 //! 4. dedup by record id then by `group`,
 //! 5. rank by `rank` desc (payload asc as a deterministic tiebreak) and take `limit`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -98,21 +98,44 @@ impl<B: AsRef<[u8]>> Index<B> {
             }
         }
 
-        // Hydrate + dedup by group.
-        let mut seen_group: HashSet<u64> = HashSet::new();
-        let mut out: Vec<Record> = Vec::with_capacity(record_ids.len());
+        // Hydrate + dedup by group, keeping the BEST representative of each group
+        // (issue #5): highest rank, then payload asc — i.e. the member that would
+        // sort first. For geo a group (gid) has exactly one record, so this is a
+        // no-op; it matters only for domains that put several records under one
+        // group.
+        let mut best: HashMap<u64, Record> = HashMap::with_capacity(record_ids.len());
         for rid in record_ids {
             let r = self.store.record(rid)?;
-            if seen_group.insert(r.group) {
-                out.push(r);
+            match best.entry(r.group) {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    if outranks(&r, e.get()) {
+                        e.insert(r);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(r);
+                }
             }
         }
 
-        // Rank: rank desc, payload asc as a deterministic tiebreak.
-        out.sort_by(|a, b| b.rank.cmp(&a.rank).then_with(|| a.payload.cmp(&b.payload)));
+        // Rank: rank desc, then payload asc, then group asc — a total, deterministic
+        // order independent of the HashMap's iteration order.
+        let mut out: Vec<Record> = best.into_values().collect();
+        out.sort_by(|a, b| {
+            b.rank
+                .cmp(&a.rank)
+                .then_with(|| a.payload.cmp(&b.payload))
+                .then_with(|| a.group.cmp(&b.group))
+        });
         out.truncate(limit);
         Ok(out)
     }
+}
+
+/// Whether `a` is a better group representative than `b`: higher rank wins, ties
+/// broken by payload ascending (the same order the final sort uses).
+fn outranks(a: &Record, b: &Record) -> bool {
+    (a.rank, std::cmp::Reverse(&a.payload)) > (b.rank, std::cmp::Reverse(&b.payload))
 }
 
 #[cfg(test)]
@@ -231,6 +254,26 @@ mod tests {
         let out = idx.suggest("x", 10).unwrap();
         assert_eq!(payload(&out[0]), "Alpha");
         assert_eq!(payload(&out[1]), "Beta");
+    }
+
+    #[test]
+    fn group_dedup_keeps_highest_rank_member() {
+        // Issue #5: two records share group 42 under the same key but have
+        // different ranks; the higher-rank one must be the survivor regardless of
+        // insertion/scan order.
+        let mut b = IndexBuilder::new();
+        let low = b.add_record(rec(42, 10, "low-rank"));
+        let high = b.add_record(rec(42, 999, "high-rank"));
+        // Insert low first so scan order would otherwise keep it.
+        b.add_key("k", low);
+        b.add_key("k", high);
+        let (fst, records) = b.build().unwrap();
+        let idx = Index::from_bytes(fst, records).unwrap();
+
+        let out = idx.suggest("k", 10).unwrap();
+        assert_eq!(out.len(), 1, "group 42 must collapse to one row");
+        assert_eq!(out[0].rank, 999);
+        assert_eq!(payload(&out[0]), "high-rank");
     }
 
     #[test]

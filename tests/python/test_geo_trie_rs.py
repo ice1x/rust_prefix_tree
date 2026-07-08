@@ -19,6 +19,9 @@ def test_normalize_matches_rust_contract():
     assert geo_trie_rs.normalize("  BER-- ") == "ber"
     assert geo_trie_rs.normalize("São Paulo") == "sao paulo"
     assert geo_trie_rs.normalize("") == ""
+    # Issue #4: apostrophes/quotes are dropped (not spaced), matching Python.
+    assert geo_trie_rs.normalize("O'Brien") == "obrien"
+    assert geo_trie_rs.normalize("St. John's") == "st johns"
     # Idempotent.
     once = geo_trie_rs.normalize("Café  de   Flore")
     assert geo_trie_rs.normalize(once) == once
