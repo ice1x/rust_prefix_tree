@@ -302,11 +302,12 @@ For each domain you only pick what the three neutral fields mean and how the
 Rules of thumb when defining an adapter:
 
 - **`group`** — the identity you want *deduped*. A prefix can reach the same item
-  via several alias keys; results collapse to one row per `group`. If you never want
-  dedup, give every record a unique `group`.
+  via several alias keys; results collapse to one row per `group`, keeping the
+  **highest-`rank`** member (ties broken by `payload`). If you never want dedup,
+  give every record a unique `group`.
 - **`rank`** — any `i64` you want sorted descending (population, sales, score,
-  timestamp as epoch seconds). Ties break deterministically on `payload` bytes. If
-  order doesn't matter, use `0`.
+  timestamp as epoch seconds). Ties break deterministically on `payload` bytes,
+  then `group`. If order doesn't matter, use `0`.
 - **`payload`** — whatever your app needs back, in any encoding you control
   (a packed struct like `src/geo.rs`, JSON, bincode, or just a UTF-8 string). The
   core stores and returns the bytes verbatim.
