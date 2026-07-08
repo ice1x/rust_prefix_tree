@@ -25,6 +25,8 @@ default = []
 python = ["dep:pyo3"]
 
 [dependencies]
+# Fuzzy matching is implemented in-crate (char-level, Unicode-safe); fst's own
+# Levenshtein automaton is byte-oriented and mis-handles non-ASCII, so it's unused.
 fst = "0.4"
 memmap2 = "0.9"
 unicode-normalization = "0.1"
