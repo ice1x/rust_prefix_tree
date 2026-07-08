@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage production image (README §8, issue #7).
+#
+# Stage 1 builds the PyO3 wheel with the Rust toolchain; stage 2 is a slim Python
+# runtime that only `pip install`s the wheel — no cargo/rustc ship to production.
+# The index artifacts (index.fst + records.bin) are NOT baked in; mount them
+# read-only at runtime so datasets regenerate without an image rebuild:
+#
+#   docker build -f Dockerfile.prod -t geo-trie-rs .
+#   docker run --rm -v "$PWD/geo-index:/data:ro" geo-trie-rs           # import check
+#   docker run --rm -v "$PWD/geo-index:/data:ro" geo-trie-rs \
+#       python /app/smoke.py ber                                       # query check
+#
+# Both stages are debian bookworm so the wheel's glibc matches the runtime.
+
+# ---- Stage 1: build the abi3 wheel (has the Rust toolchain) -------------------
+FROM rust:1-slim-bookworm AS builder
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install maturin into an isolated venv.
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --no-cache-dir "maturin>=1.5,<2.0"
+
+WORKDIR /src
+COPY . .
+
+# abi3 wheel; force a plain linux tag (same glibc as the runtime image) so we do
+# not need auditwheel/manylinux tooling.
+RUN maturin build --release --features python --compatibility linux --out /dist
+
+# ---- Stage 2: runtime, NO Rust toolchain -------------------------------------
+FROM python:3.12-slim-bookworm AS runtime
+
+# Install only the built wheel; nothing else from the build stage carries over.
+COPY --from=builder /dist/*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/*.whl && rm -f /tmp/*.whl
+
+# Artifacts are mounted read-only at run time (see header), pointed at by env —
+# the same seam the reviews service reads for GEO_BACKEND=rust.
+ENV GEO_FST_PATH=/data/index.fst \
+    GEO_RECORDS_PATH=/data/records.bin
+
+COPY docker/smoke.py /app/smoke.py
+WORKDIR /app
+
+# Default: prove the extension imports in the rust-free image. Override the CMD to
+# launch the reviews service (which imports geo_trie_rs the same way).
+CMD ["python", "-c", "import geo_trie_rs; print('geo_trie_rs ready')"]
