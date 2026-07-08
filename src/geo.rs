@@ -70,6 +70,20 @@ impl<B: AsRef<[u8]>> Index<B> {
             .map(GeoRecord::from_record)
             .collect()
     }
+
+    /// Geo-typed convenience over [`Index::suggest_fuzzy`] (typo-tolerant). With
+    /// `max_edits == 0` this is identical to [`Index::suggest_geo`].
+    pub fn suggest_geo_fuzzy(
+        &self,
+        prefix: &str,
+        limit: usize,
+        max_edits: u32,
+    ) -> io::Result<Vec<GeoRecord>> {
+        self.suggest_fuzzy(prefix, limit, max_edits)?
+            .iter()
+            .map(GeoRecord::from_record)
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -115,6 +129,27 @@ mod tests {
         assert_eq!(hits[0].name, "Berlin"); // higher population first
         assert_eq!(hits[0].country, "DE");
         assert_eq!(hits[1].name, "Bern");
+    }
+
+    #[test]
+    fn suggest_geo_fuzzy_recovers_typo_and_off_matches_exact() {
+        let mut b = IndexBuilder::new();
+        let sol = b.add_record(geo(3143244, "Solnechnogorsk", "RU", 52_798).to_record());
+        b.add_key("solnechnogorsk", sol);
+        b.add_key("солнечногорск", sol);
+        let (fst, records) = b.build().unwrap();
+        let idx = Index::from_bytes(fst, records).unwrap();
+
+        // Typo tolerated at edit distance 1 (Cyrillic too).
+        let hits = idx.suggest_geo_fuzzy("солнечо", 8, 1).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "Solnechnogorsk");
+
+        // max_edits == 0 is identical to the exact geo suggest.
+        assert_eq!(
+            idx.suggest_geo("solnech", 8).unwrap(),
+            idx.suggest_geo_fuzzy("solnech", 8, 0).unwrap(),
+        );
     }
 
     #[test]

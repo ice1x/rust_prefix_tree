@@ -60,15 +60,20 @@ impl Index {
     /// Autocomplete: `(rank, group, payload_bytes)` rows whose normalized key starts
     /// with `prefix`, deduped by `group`, ranked by `rank` desc, truncated to
     /// `limit`. Decode `payload_bytes` with your domain adapter (e.g. `geo_unpack`).
-    #[pyo3(signature = (prefix, limit = 8))]
+    ///
+    /// `max_edits` (default 0) enables typo tolerance: 0 is exact prefix (identical
+    /// to before), 1–2 recover near-miss queries via a Levenshtein automaton. Keep
+    /// it opt-in / behind a query param — it changes result semantics (README §10).
+    #[pyo3(signature = (prefix, limit = 8, max_edits = 0))]
     fn suggest<'py>(
         &self,
         py: Python<'py>,
         prefix: &str,
         limit: usize,
+        max_edits: u32,
     ) -> PyResult<Vec<PyHit<'py>>> {
         self.inner
-            .suggest(prefix, limit)
+            .suggest_fuzzy(prefix, limit, max_edits)
             .map(|records| {
                 records
                     .into_iter()

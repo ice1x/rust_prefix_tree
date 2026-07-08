@@ -407,6 +407,11 @@ for rank, group, payload in idx.suggest("berl", limit=8):
     gid, name, lat, lon, country, population, feature_code = \
         geo_trie_rs.geo_unpack(rank, group, payload)
 
+# Optional typo tolerance (off by default): max_edits=1|2 (issue #8).
+# Exact prefix misses the typo; edit distance 1 recovers it.
+assert idx.suggest("солнечо", 8) == []
+rows = idx.suggest("солнечо", 8, max_edits=1)     # -> Солнечногорск
+
 # Fold queries identically to the index (idempotent, matches the Python normalizer):
 key = geo_trie_rs.normalize("Zürich-HB")   # -> "zurich hb"
 ```
@@ -414,6 +419,22 @@ key = geo_trie_rs.normalize("Zürich-HB")   # -> "zurich hb"
 This drops in behind `RustGeoIndex` (§5): the wrapper maps each row to a
 `GeoRecord`, keeping the `/geo/suggest` contract unchanged. A different domain skips
 `geo_unpack` and decodes its own payload bytes.
+
+### Fuzzy / typo tolerance (opt-in)
+
+`suggest` takes an optional edit distance; `Index::suggest_fuzzy(prefix, limit,
+max_edits)` in Rust, `Index.suggest(prefix, limit, max_edits=…)` in Python.
+
+- **`max_edits = 0`** (default) — exact prefix, byte-identical to before. Enable
+  fuzzy behind a `/geo/suggest` query param before turning it on by default, since
+  it changes result semantics (README §10).
+- **`1`–`2`** — a key matches if some prefix of it is within that many **character**
+  edits of the query (`солнечо` +1 → `Солнечногорск`). `MAX_EDITS` caps it at 2.
+- Fuzzy is implemented in-crate with a Unicode-aware (character-level) Levenshtein.
+  `fst`'s own Levenshtein automaton is byte-oriented and silently mis-handles
+  non-ASCII at distance > 0, so it is not used.
+- To stay bounded it anchors on the query's **first character**, so a typo in the
+  very first character isn't recovered (a standard autocomplete assumption).
 
 ### Tests
 
@@ -447,8 +468,9 @@ artifact). Each stage gates the next.
 
 ### Not yet built
 
-Fuzzy / Levenshtein matching (§4), the Docker multi-stage prod build (§8), and the
-`GEO_BACKEND` flag wiring on the Python side (§5) — all still to do.
+The Docker multi-stage prod build (§8) and the `GEO_BACKEND` flag wiring on the
+Python side (§5) — still to do. (Fuzzy / Levenshtein matching is now implemented,
+opt-in — see above.)
 
 ---
 

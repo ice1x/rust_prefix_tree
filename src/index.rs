@@ -24,6 +24,10 @@ use memmap2::Mmap;
 use crate::normalize::normalize;
 use crate::records::{Record, RecordStore};
 
+/// Largest edit distance accepted by [`Index::suggest_fuzzy`]. Small on purpose:
+/// 1–2 covers realistic typos, and the candidate scan cost grows with tolerance.
+pub const MAX_EDITS: u32 = 2;
+
 /// A read-only autocomplete index over some byte backing store `B` (an owned
 /// `Vec<u8>` in tests, a `memmap2::Mmap` in production).
 pub struct Index<B: AsRef<[u8]>> {
@@ -73,21 +77,58 @@ impl<B: AsRef<[u8]>> Index<B> {
         self.store.n_records() == 0
     }
 
-    /// Autocomplete: records whose normalized key starts with `prefix`, deduped by
-    /// `group`, ranked by `rank` descending, truncated to `limit`.
+    /// Exact-prefix autocomplete: records whose normalized key starts with `prefix`,
+    /// deduped by `group`, ranked by `rank` descending, truncated to `limit`.
     ///
     /// Returns neutral [`Record`]s; decode `payload` with your domain adapter (e.g.
     /// [`crate::geo::GeoRecord::from_record`]).
     pub fn suggest(&self, prefix: &str, limit: usize) -> io::Result<Vec<Record>> {
+        self.suggest_fuzzy(prefix, limit, 0)
+    }
+
+    /// Fuzzy autocomplete tolerating up to `max_edits` typos (issue #8, README §4).
+    ///
+    /// `max_edits == 0` is exact prefix and byte-identical to [`Index::suggest`].
+    /// Otherwise a key matches if some prefix of it is within `max_edits`
+    /// **character** edits (Levenshtein) of the normalized query — so `солнечо`
+    /// (1 edit) recovers `Солнечногорск`. To stay bounded, candidates are the keys
+    /// that share the query's first character (typos in the first character are not
+    /// recovered — a standard autocomplete assumption). `max_edits` must be
+    /// `<= MAX_EDITS`.
+    ///
+    /// Fuzzy changes result semantics, so keep it opt-in (gate it behind a query
+    /// param before enabling by default — README §10).
+    pub fn suggest_fuzzy(
+        &self,
+        prefix: &str,
+        limit: usize,
+        max_edits: u32,
+    ) -> io::Result<Vec<Record>> {
         let norm = normalize(prefix);
         if norm.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
+        if max_edits > MAX_EDITS {
+            return Err(err_other(format!(
+                "max_edits {max_edits} exceeds MAX_EDITS {MAX_EDITS}"
+            )));
+        }
 
-        // Prefix range scan over the FST.
-        let automaton = Str::new(&norm).starts_with();
-        let mut stream = self.map.search(automaton).into_stream();
+        let record_ids = if max_edits == 0 {
+            // Exact prefix — same path (and results) as before fuzzy existed.
+            self.gather_exact(&norm)?
+        } else {
+            self.gather_fuzzy(&norm, max_edits)?
+        };
+        self.finalize(record_ids, limit)
+    }
 
+    /// Collect record ids for keys with the exact `prefix` (a range scan).
+    fn gather_exact(&self, prefix: &str) -> io::Result<Vec<u32>> {
+        let mut stream = self
+            .map
+            .search(Str::new(prefix).starts_with())
+            .into_stream();
         let mut record_ids: Vec<u32> = Vec::new();
         let mut seen_rid: HashSet<u32> = HashSet::new();
         while let Some((_key, value)) = stream.next() {
@@ -97,7 +138,42 @@ impl<B: AsRef<[u8]>> Index<B> {
                 }
             }
         }
+        Ok(record_ids)
+    }
 
+    /// Collect record ids for keys some prefix of which is within `max_edits`
+    /// character edits of `query`. Candidates are keys sharing the query's first
+    /// character; each is filtered by [`prefix_edit_distance_le`].
+    fn gather_fuzzy(&self, query: &str, max_edits: u32) -> io::Result<Vec<u32>> {
+        let qchars: Vec<char> = query.chars().collect();
+        // Anchor the scan on the first character to bound the candidate set.
+        let mut first = String::new();
+        first.push(qchars[0]);
+        let mut stream = self
+            .map
+            .search(Str::new(&first).starts_with())
+            .into_stream();
+
+        let mut record_ids: Vec<u32> = Vec::new();
+        let mut seen_rid: HashSet<u32> = HashSet::new();
+        while let Some((key_bytes, value)) = stream.next() {
+            let key = match std::str::from_utf8(key_bytes) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            if prefix_edit_distance_le(&qchars, key, max_edits) {
+                for rid in self.store.posting(value as u32)? {
+                    if seen_rid.insert(rid) {
+                        record_ids.push(rid);
+                    }
+                }
+            }
+        }
+        Ok(record_ids)
+    }
+
+    /// Hydrate record ids into ranked, deduped records (shared by both paths).
+    fn finalize(&self, record_ids: Vec<u32>, limit: usize) -> io::Result<Vec<Record>> {
         // Hydrate + dedup by group, keeping the BEST representative of each group
         // (issue #5): highest rank, then payload asc — i.e. the member that would
         // sort first. For geo a group (gid) has exactly one record, so this is a
@@ -130,6 +206,48 @@ impl<B: AsRef<[u8]>> Index<B> {
         out.truncate(limit);
         Ok(out)
     }
+}
+
+fn err_other(msg: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, msg)
+}
+
+/// Whether some prefix of `key` is within `max` character edits (Levenshtein) of
+/// the full `query`. Operates on Unicode scalar values (so a Cyrillic typo counts
+/// as one edit, unlike fst's byte-oriented Levenshtein).
+///
+/// DP over the standard edit-distance matrix `M[k][j] = dist(key[..k], query[..j])`,
+/// extending `key` one char at a time and tracking `min_k M[k][n]` (n = query len).
+/// Extra `key` chars beyond a match are free (that is the "prefix" part). Rows whose
+/// every entry exceeds `max` allow an early break, since they can only grow.
+fn prefix_edit_distance_le(query: &[char], key: &str, max: u32) -> bool {
+    let n = query.len();
+    // row[j] = edit distance between the current key prefix and query[..j].
+    let mut row: Vec<u32> = (0..=n as u32).collect();
+    if row[n] <= max {
+        return true; // empty key prefix already within budget (query shorter than max)
+    }
+    for c in key.chars() {
+        let mut prev_diag = row[0]; // M[k][0]
+        row[0] += 1; // M[k+1][0]
+        let mut row_min = row[0];
+        for j in 1..=n {
+            let m_k_j = row[j]; // M[k][j] before overwrite
+            let cost = if query[j - 1] == c { 0 } else { 1 };
+            row[j] = (prev_diag + cost) // substitute / match
+                .min(row[j] + 1) // delete key char
+                .min(row[j - 1] + 1); // insert query char
+            prev_diag = m_k_j;
+            row_min = row_min.min(row[j]);
+        }
+        if row[n] <= max {
+            return true;
+        }
+        if row_min > max {
+            break; // no longer key prefix can bring any entry back under budget
+        }
+    }
+    false
 }
 
 /// Whether `a` is a better group representative than `b`: higher rank wins, ties
@@ -297,6 +415,78 @@ mod tests {
         let idx = sample();
         let out = idx.suggest("ber", 999).unwrap();
         assert_eq!(out.len(), 3);
+    }
+
+    /// Index a long key to exercise fuzzy-prefix recovery.
+    fn fuzzy_sample() -> Index<Vec<u8>> {
+        let mut b = IndexBuilder::new();
+        let sol = b.add_record(rec(1, 52_798, "Solnechnogorsk"));
+        let ber = b.add_record(rec(2, 3_600_000, "Berlin"));
+        b.add_key("solnechnogorsk", sol);
+        b.add_key("berlin", ber);
+        let (fst, records) = b.build().unwrap();
+        Index::from_bytes(fst, records).unwrap()
+    }
+
+    #[test]
+    fn fuzzy_recovers_near_miss() {
+        let idx = fuzzy_sample();
+        // "solnecho" is NOT an exact prefix of "solnechnogorsk"...
+        assert!(idx.suggest("solnecho", 8).unwrap().is_empty());
+        // ...but within 1 edit of the prefix "solnechn", so fuzzy recovers it.
+        let out = idx.suggest_fuzzy("solnecho", 8, 1).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(payload(&out[0]), "Solnechnogorsk");
+
+        // Two typos need distance 2.
+        assert!(idx.suggest_fuzzy("salnecha", 8, 1).unwrap().is_empty());
+        let out2 = idx.suggest_fuzzy("salnecha", 8, 2).unwrap();
+        assert_eq!(out2.len(), 1);
+        assert_eq!(payload(&out2[0]), "Solnechnogorsk");
+    }
+
+    #[test]
+    fn fuzzy_off_is_byte_identical_to_exact() {
+        let idx = fuzzy_sample();
+        for q in ["sol", "solnechnogorsk", "ber", "berlin", "xyz", ""] {
+            assert_eq!(
+                idx.suggest(q, 8).unwrap(),
+                idx.suggest_fuzzy(q, 8, 0).unwrap(),
+                "fuzzy(0) diverges from exact for {q:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fuzzy_still_prefix_not_whole_word() {
+        // Distance-1 fuzzy of a short prefix must not accidentally pull unrelated
+        // records: "berlin" is far from "solnecho".
+        let idx = fuzzy_sample();
+        let out = idx.suggest_fuzzy("solnecho", 8, 1).unwrap();
+        assert!(out.iter().all(|r| payload(r) != "Berlin"));
+    }
+
+    #[test]
+    fn fuzzy_rejects_too_many_edits() {
+        let idx = fuzzy_sample();
+        let e = idx.suggest_fuzzy("sol", 8, MAX_EDITS + 1).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn prefix_edit_distance_le_unit() {
+        let q: Vec<char> = "солнечо".chars().collect();
+        // Prefix "солнечн" of the key is 1 substitution away; extra chars are free.
+        assert!(prefix_edit_distance_le(&q, "солнечногорск", 1));
+        assert!(!prefix_edit_distance_le(&q, "солнечногорск", 0));
+
+        let q2: Vec<char> = "kat".chars().collect();
+        assert!(prefix_edit_distance_le(&q2, "katze", 0)); // exact prefix
+        assert!(prefix_edit_distance_le(&q2, "cat", 1)); // 1 substitution
+        assert!(!prefix_edit_distance_le(&q2, "dog", 2)); // too far
+                                                          // Deletion: query longer than a short key still matches within budget.
+        let q3: Vec<char> = "berlim".chars().collect();
+        assert!(prefix_edit_distance_le(&q3, "berlin", 1));
     }
 
     #[test]

@@ -98,6 +98,24 @@ def test_miss_returns_empty(geo_index):
     assert idx.suggest("", 8) == []
 
 
+def test_fuzzy_is_opt_in_and_recovers_typos(geo_index):
+    idx = open_index(geo_index)
+    # Exact prefix (default max_edits=0) does not recover the typo.
+    assert idx.suggest("solnecho", 8) == []
+    # Edit distance 1 recovers Solnechnogorsk (issue #8).
+    rows = idx.suggest("solnecho", 8, max_edits=1)
+    assert len(rows) == 1
+    assert geo_trie_rs.geo_unpack(*rows[0])[1] == "Solnechnogorsk"
+    # With the flag off, results are byte-identical to exact prefix.
+    assert idx.suggest("ber", 8) == idx.suggest("ber", 8, max_edits=0)
+
+
+def test_fuzzy_rejects_too_many_edits(geo_index):
+    idx = open_index(geo_index)
+    with pytest.raises(Exception):
+        idx.suggest("ber", 8, max_edits=99)
+
+
 def test_open_missing_file_raises():
     with pytest.raises(IOError):
         geo_trie_rs.Index.open("/nonexistent/index.fst", "/nonexistent/records.bin")
