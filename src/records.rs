@@ -245,4 +245,62 @@ mod tests {
         bytes[0..8].copy_from_slice(b"NOTAGEO!");
         assert!(RecordStore::new(bytes).is_err());
     }
+
+    #[test]
+    fn truncated_buffer_rejected() {
+        // Shorter than the header.
+        assert!(RecordStore::new(vec![0u8; HEADER_LEN - 1]).is_err());
+        // Correct magic but a total_len that disagrees with the actual length.
+        let (_fst, mut records) = {
+            let mut b = IndexBuilder::new();
+            let a = b.add_record(rec(1, 1, "x"));
+            b.add_key("x", a);
+            b.build().unwrap()
+        };
+        records.pop(); // corrupt the length
+        assert!(RecordStore::new(records).is_err());
+    }
+
+    #[test]
+    fn posting_returns_sorted_unique_ids() {
+        let mut b = IndexBuilder::new();
+        let r0 = b.add_record(rec(10, 1, "a"));
+        let r1 = b.add_record(rec(11, 1, "b"));
+        let r2 = b.add_record(rec(12, 1, "c"));
+        // Single key linked to records out of order and with a duplicate.
+        b.add_key("k", r2);
+        b.add_key("k", r0);
+        b.add_key("k", r0); // dup
+        b.add_key("k", r1);
+        let (_fst, records) = b.build().unwrap();
+        let store = RecordStore::new(records).unwrap();
+        assert_eq!(store.n_postings(), 1);
+        assert_eq!(store.posting(0).unwrap(), vec![r0, r1, r2]);
+    }
+
+    #[test]
+    fn binary_and_negative_fields_roundtrip() {
+        let mut b = IndexBuilder::new();
+        let payload = vec![0u8, 255, 10, 13, 0, 42];
+        b.add_record(Record {
+            group: u64::MAX,
+            rank: i64::MIN,
+            payload: payload.clone(),
+        });
+        let (_fst, records) = b.build().unwrap();
+        let store = RecordStore::new(records).unwrap();
+        let got = store.record(0).unwrap();
+        assert_eq!(got.group, u64::MAX);
+        assert_eq!(got.rank, i64::MIN);
+        assert_eq!(got.payload, payload);
+    }
+
+    #[test]
+    fn empty_payload_roundtrips() {
+        let mut b = IndexBuilder::new();
+        b.add_record(rec(1, 0, ""));
+        let (_fst, records) = b.build().unwrap();
+        let store = RecordStore::new(records).unwrap();
+        assert_eq!(store.record(0).unwrap().payload, Vec::<u8>::new());
+    }
 }

@@ -98,4 +98,37 @@ mod tests {
     fn keeps_cyrillic_lowercased() {
         assert_eq!(normalize("Солнечногорск"), "солнечногорск");
     }
+
+    #[test]
+    fn nfkd_compatibility_decomposition() {
+        // Ligatures, superscripts and full-width forms fold to their ASCII base.
+        assert_eq!(normalize("ﬁnd"), "find"); // U+FB01 ligature fi
+        assert_eq!(normalize("m²"), "m2"); // superscript two
+        assert_eq!(normalize("ＦＵＬＬ"), "full"); // full-width latin
+    }
+
+    #[test]
+    fn collapses_mixed_and_repeated_separators() {
+        assert_eq!(normalize("a  -_/,. b"), "a b");
+        assert_eq!(normalize("(New) York"), "new york");
+        assert_eq!(normalize("O'Brien"), "o brien");
+    }
+
+    #[test]
+    fn only_separators_and_diacritics_yield_empty() {
+        assert_eq!(normalize(" - _ / "), "");
+        // A lone combining acute accent (U+0301) decomposes/drops to nothing.
+        assert_eq!(normalize("\u{0301}"), "");
+    }
+
+    #[test]
+    fn idempotent_on_compatibility_and_mixed() {
+        for s in ["ﬁnd", "m²", "ＦＵＬＬ", "(New)--York", "  O'Brien  "] {
+            assert_eq!(
+                normalize(&normalize(s)),
+                normalize(s),
+                "not idempotent: {s:?}"
+            );
+        }
+    }
 }
