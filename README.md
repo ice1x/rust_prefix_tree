@@ -416,21 +416,33 @@ This drops in behind `RustGeoIndex` (§5): the wrapper maps each row to a
 
 ### Tests
 
+The suite has four layers:
+
+| Layer | Where | What it covers |
+|---|---|---|
+| **Unit** | `#[cfg(test)]` in `src/*` | normalization (NFKD compat, mixed separators, idempotence), `records.bin` reader (truncation, postings, binary/edge payloads), builder (postings grouping, key sort/dedup, unicode), `suggest` (ranking, tiebreak, dedup, mmap open, misses), geo adapter. |
+| **Integration** | `tests/integration.rs` | `build-index` CLI parsing + error paths, and three domains via the public API — geo, people/ФИО, products. |
+| **E2E** | `tests/e2e.rs` | full pipeline at ~1000 rows through the real `build-index` binary: ranking/dedup at scale, **byte-for-byte deterministic builds**, independent-`open` agreement, core/adapter parity. |
+| **E2E (black-box)** | `scripts/e2e.sh` | the deployment path: build wheel → `pip install` → build artifacts via CLI → query from a fresh Python process and assert. |
+| **Python** | `tests/python/` | pytest over the PyO3 surface (`Index.open`, `suggest`, `geo_unpack`, `normalize`). |
+
 ```sh
-cargo test                       # Rust unit + integration (default, no Python)
+cargo test                          # unit + integration + e2e (default, no Python)
 cargo clippy --all-targets --features python -- -D warnings
 
-# Python surface (needs the wheel installed; the pytest fixtures build the
-# artifacts via the build-index CLI, so a Rust toolchain must be on PATH):
-maturin develop --features python   # or: pip install the built wheel
+# Python surface (pytest fixtures build artifacts via the build-index CLI, so a
+# Rust toolchain must be on PATH):
+maturin develop --features python    # or: pip install the built wheel
 pytest tests/python
+
+# Black-box deployment e2e (build wheel, install, CLI build, query):
+bash scripts/e2e.sh
 ```
 
-Coverage spans normalization (incl. NFKD compatibility, mixed separators),
-the `records.bin` reader (truncation, postings, binary/edge payloads), the
-builder (postings grouping, key sort/dedup, unicode keys), `suggest` (ranking,
-tiebreak, dedup, mmap open, misses), the geo adapter, the `build-index` CLI
-error paths, and three domains end-to-end (geo, people/ФИО, products).
+CI runs these as a gated pipeline (`.github/workflows/ci.yml`):
+**1 · lint** (fmt + clippy, default and `python`) → **2 · test** (`cargo test`,
+incl. e2e) → **3 · e2e** (pytest + `scripts/e2e.sh`) → **4 · wheel** (maturin
+artifact). Each stage gates the next.
 
 ### Not yet built
 

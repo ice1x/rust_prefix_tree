@@ -8,54 +8,72 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Staged pipeline: lint -> test -> e2e -> wheel. Each stage gates the next so a
+# failure surfaces at the earliest, cheapest point.
 jobs:
-  rust:
-    name: fmt + clippy + test
+  lint:
+    name: 1 · lint (fmt + clippy)
     runs-on: macos-14 # self-hosted macOS ARM64 in prod; GitHub arm64 runner here
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
+      - uses: Swatinem/rust-cache@v2
       - name: Format check
         run: cargo fmt --check
-
-      # Default (Python-free) build: the primary correctness gate.
       - name: Clippy (default features)
         run: cargo clippy --all-targets -- -D warnings
-
-      - name: Test (default features)
-        run: cargo test --all-targets
-
-      # PyO3 build must also stay lint-clean; wheels are produced by maturin.
       - name: Clippy (python feature)
         run: cargo clippy --all-targets --features python -- -D warnings
 
-  wheel:
-    name: build wheel (maturin)
+  test:
+    name: 2 · test (unit + integration + e2e)
+    needs: lint
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Runs src/ unit tests, tests/integration.rs and tests/e2e.rs (which drives
+      # the real build-index binary at scale + determinism checks).
+      - name: cargo test
+        run: cargo test --all-targets
+
+  e2e:
+    name: 3 · e2e (wheel → CLI → Python)
+    needs: test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Build abi3 wheel
+      - name: Python surface tests (pytest over the installed wheel)
         run: |
           python -m pip install --upgrade maturin pytest
           maturin build --release --features python --out dist
-      - name: Install wheel and run Python tests
-        run: |
           python -m pip install --find-links dist geo_trie_rs
-          # `build-index` CLI (used by the pytest fixtures) needs the Rust toolchain.
           pytest tests/python -v
+      - name: Black-box deployment e2e
+        run: bash scripts/e2e.sh
+
+  wheel:
+    name: 4 · wheel (maturin artifact)
+    needs: e2e
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build abi3 wheel
+        run: |
+          python -m pip install --upgrade maturin
+          maturin build --release --features python --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: wheels
