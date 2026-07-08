@@ -282,6 +282,66 @@ domain adapter encodes/decodes its own `payload`. See `src/geo.rs` for the geo
 adapter and the `people_index_is_just_another_adapter` integration test for a second
 domain built on the same `Index`/`IndexBuilder`.
 
+#### Concrete use cases
+
+The same engine covers any "type a prefix → ranked, deduped suggestions" problem.
+For each domain you only pick what the three neutral fields mean and how the
+`payload` is encoded — nothing in the core changes:
+
+| Domain | `key`s indexed (aliases) | `group` (dedup) | `rank` (sort ↓) | `payload` (opaque) |
+|---|---|---|---|---|
+| **Geo** (this repo) | place name + multilingual/alt names | GeoNames `gid` | `population` | `lat, lon, country, feature_code, name` — `src/geo.rs` |
+| **People / ФИО** | «Фамилия Имя», transliterations, login | person id | relevance / recency / seniority | `"Фамилия Имя Отчество\|Отдел"` (or JSON) |
+| **Products / SKU** | title, brand, model, synonyms | product id (dedup variants) | popularity / sales rank | `sku, price, title, thumbnail_url` |
+| **Companies / ИНН** | legal + trade names, abbreviations | `ИНН`/registry id | revenue / employees | `inn, ogrn, legal_name, address` |
+| **Tags / hashtags** | tag + spelling variants | tag id | usage count | `tag, description` |
+| **Files / symbols** (IDE-style) | filename, path segments, symbol names | file/symbol id | recency / access frequency | `path, line, kind` |
+| **Streets / addresses** | street + house-range names | address id | — (or importance) | `city, street, postcode, lat, lon` |
+| **Emoji / commands** | name + keywords | id | frequency of use | `glyph`/`command, description` |
+
+Rules of thumb when defining an adapter:
+
+- **`group`** — the identity you want *deduped*. A prefix can reach the same item
+  via several alias keys; results collapse to one row per `group`. If you never want
+  dedup, give every record a unique `group`.
+- **`rank`** — any `i64` you want sorted descending (population, sales, score,
+  timestamp as epoch seconds). Ties break deterministically on `payload` bytes. If
+  order doesn't matter, use `0`.
+- **`payload`** — whatever your app needs back, in any encoding you control
+  (a packed struct like `src/geo.rs`, JSON, bincode, or just a UTF-8 string). The
+  core stores and returns the bytes verbatim.
+
+#### Writing an adapter (≈20 lines)
+
+```rust
+use geo_trie_rs::{normalize, Index, IndexBuilder, Record};
+
+struct Person { id: u64, score: i64, full_name: String, dept: String }
+
+fn to_record(p: &Person) -> Record {
+    Record { group: p.id, rank: p.score,
+             payload: format!("{}|{}", p.full_name, p.dept).into_bytes() }
+}
+fn from_record(r: &Record) -> (String, String) {
+    let s = String::from_utf8(r.payload.clone()).unwrap();
+    let (name, dept) = s.split_once('|').unwrap();
+    (name.into(), dept.into())
+}
+
+let mut b = IndexBuilder::new();
+let id = b.add_record(to_record(&person));
+for alias in ["Иванова Мария", "Ivanova Maria"] {   // index under every alias
+    b.add_key(&normalize(alias), id);
+}
+let (fst, records) = b.build()?;
+let idx = Index::from_bytes(fst, records)?;         // or Index::open(paths) to mmap
+for r in idx.suggest("иван", 8)? { let (name, dept) = from_record(&r); /* ... */ }
+```
+
+From Python it's the same shape: `idx.suggest(prefix, limit)` yields
+`(rank, group, payload_bytes)` and you decode `payload_bytes` yourself (the geo
+build uses the bundled `geo_unpack` helper).
+
 ### Crate layout
 
 | File | Role |
