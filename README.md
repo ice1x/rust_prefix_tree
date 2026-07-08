@@ -445,10 +445,26 @@ CI runs these as a gated pipeline (`.github/workflows/ci.yml`):
 incl. e2e) → **3 · e2e** (pytest + `scripts/e2e.sh`) → **4 · wheel** (maturin
 artifact). Each stage gates the next.
 
+### Production image (Docker)
+
+`Dockerfile.prod` is a multi-stage build (README §8): stage 1 (`rust:slim`) builds
+the abi3 wheel with maturin; stage 2 (`python:slim`) only `pip install`s it — **no
+Rust toolchain ships to production**. The `index.fst` + `records.bin` artifacts are
+**not baked in**; mount them read-only so datasets regenerate without an image
+rebuild (the same seam the reviews service reads via `GEO_FST_PATH` /
+`GEO_RECORDS_PATH`).
+
+```sh
+docker build -f Dockerfile.prod -t geo-trie-rs .
+docker run --rm geo-trie-rs                                  # -> "geo_trie_rs ready"
+docker run --rm -v "$PWD/geo-index:/data:ro" geo-trie-rs \
+    python /app/smoke.py ber                                # query mounted artifacts
+```
+
 ### Not yet built
 
-Fuzzy / Levenshtein matching (§4), the Docker multi-stage prod build (§8), and the
-`GEO_BACKEND` flag wiring on the Python side (§5) — all still to do.
+Fuzzy / Levenshtein matching (§4) and the `GEO_BACKEND` flag wiring on the Python
+side (§5) — still to do.
 
 ---
 
