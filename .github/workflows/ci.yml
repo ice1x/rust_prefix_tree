@@ -45,10 +45,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
       - name: Build abi3 wheel
         run: |
-          python -m pip install --upgrade maturin
+          python -m pip install --upgrade maturin pytest
           maturin build --release --features python --out dist
+      - name: Install wheel and run Python tests
+        run: |
+          python -m pip install --find-links dist geo_trie_rs
+          # `build-index` CLI (used by the pytest fixtures) needs the Rust toolchain.
+          pytest tests/python -v
       - uses: actions/upload-artifact@v4
         with:
           name: wheels

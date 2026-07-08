@@ -125,6 +125,14 @@ fn serialize_records(postings: &[Vec<u32>], records: &[Record]) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    fn rec(group: u64, rank: i64, payload: &str) -> Record {
+        Record {
+            group,
+            rank,
+            payload: payload.as_bytes().to_vec(),
+        }
+    }
+
     #[test]
     fn rejects_nothing_and_builds_empty() {
         let (fst, records) = IndexBuilder::new().build().unwrap();
@@ -133,5 +141,42 @@ mod tests {
         let store = crate::records::RecordStore::new(records).unwrap();
         assert_eq!(store.n_records(), 0);
         assert_eq!(store.n_postings(), 0);
+    }
+
+    #[test]
+    fn one_posting_per_distinct_key_in_sorted_order() {
+        let mut b = IndexBuilder::new();
+        let r0 = b.add_record(rec(1, 1, "zero"));
+        let r1 = b.add_record(rec(2, 1, "one"));
+        // Insert keys out of lexicographic order; builder must sort them.
+        b.add_key("b", r1);
+        b.add_key("b", r0);
+        b.add_key("a", r0);
+        let (fst, records) = b.build().unwrap();
+
+        let store = crate::records::RecordStore::new(records).unwrap();
+        assert_eq!(store.n_postings(), 2, "two distinct keys -> two postings");
+
+        // The FST maps each key to its postings index in sorted key order:
+        // "a" -> 0, "b" -> 1.
+        let map = fst::Map::new(fst).unwrap();
+        assert_eq!(map.get("a"), Some(0));
+        assert_eq!(map.get("b"), Some(1));
+        assert_eq!(map.get("missing"), None);
+
+        assert_eq!(store.posting(0).unwrap(), vec![r0]); // key "a"
+        assert_eq!(store.posting(1).unwrap(), vec![r0, r1]); // key "b", sorted-unique
+    }
+
+    #[test]
+    fn unicode_keys_supported() {
+        let mut b = IndexBuilder::new();
+        let r = b.add_record(rec(1, 1, "place"));
+        b.add_key("солнечногорск", r);
+        b.add_key("zürich", r);
+        let (fst, _records) = b.build().unwrap();
+        let map = fst::Map::new(fst).unwrap();
+        assert!(map.get("солнечногорск").is_some());
+        assert!(map.get("zürich").is_some());
     }
 }

@@ -116,4 +116,45 @@ mod tests {
         assert_eq!(hits[0].country, "DE");
         assert_eq!(hits[1].name, "Bern");
     }
+
+    #[test]
+    fn edge_values_and_unicode_roundtrip() {
+        let g = GeoRecord {
+            gid: u64::MAX,
+            lat: -89.999,
+            lon: 179.999,
+            population: 0,
+            country: String::new(), // empty string field
+            feature_code: "PPL".into(),
+            name: "Улан-Удэ".into(), // unicode + would-be-separator inside name
+        };
+        assert_eq!(GeoRecord::from_record(&g.to_record()).unwrap(), g);
+    }
+
+    #[test]
+    fn malformed_payload_errors() {
+        // A record whose payload is too short to hold lat/lon must error, not panic.
+        let bad = Record {
+            group: 1,
+            rank: 1,
+            payload: vec![0, 1, 2],
+        };
+        assert!(GeoRecord::from_record(&bad).is_err());
+    }
+
+    #[test]
+    fn suggest_geo_dedups_by_gid_over_aliases() {
+        let mut b = IndexBuilder::new();
+        let berlin = b.add_record(geo(2950159, "Berlin", "DE", 3_426_354).to_record());
+        // Same place reachable via several aliases -> must appear once.
+        for k in ["berlin", "berlín", "берлин", "ber"] {
+            b.add_key(&crate::normalize::normalize(k), berlin);
+        }
+        let (fst, records) = b.build().unwrap();
+        let idx = Index::from_bytes(fst, records).unwrap();
+
+        let hits = idx.suggest_geo("ber", 8).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].gid, 2950159);
+    }
 }

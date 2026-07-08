@@ -7,11 +7,34 @@
 //! * the same engine driving a **different domain** (people / ФИО) with no core
 //!   changes — proving the index is domain-agnostic.
 
+use std::io::Write;
 use std::process::Command;
 
 use geo_trie_rs::{normalize, GeoRecord, Index, IndexBuilder, Record};
 use memmap2::Mmap;
 use tempfile::tempdir;
+
+/// Write `contents` to a temp `.tsv` and run `build-index <tsv> <out>`.
+/// Returns `(exit_success, stderr, out_dir)`.
+fn run_build_index(contents: &str) -> (bool, String, tempfile::TempDir) {
+    let dir = tempdir().unwrap();
+    let tsv = dir.path().join("in.tsv");
+    std::fs::File::create(&tsv)
+        .unwrap()
+        .write_all(contents.as_bytes())
+        .unwrap();
+    let out = tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_build-index"))
+        .arg(&tsv)
+        .arg(out.path())
+        .output()
+        .expect("run build-index");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        out,
+    )
+}
 
 // ----------------------------------------------------------------------------
 // Geo domain (the original use case), via the geo adapter.
@@ -100,6 +123,85 @@ fn geo_build_index_cli_then_mmap() {
 }
 
 // ----------------------------------------------------------------------------
+// build-index CLI: parsing edge cases and error handling.
+// ----------------------------------------------------------------------------
+
+#[test]
+fn cli_skips_comments_and_blank_lines() {
+    let tsv = "# header comment\n\
+               2950159\tBerlin\t52.5\t13.4\tDE\t3426354\tPPLC\tBerlin\n\
+               \n\
+               # another comment\n\
+               2988507\tParis\t48.8\t2.3\tFR\t2138551\tPPLC\tParis\n";
+    let (ok, _stderr, out) = run_build_index(tsv);
+    assert!(ok);
+    let idx =
+        Index::<Mmap>::open(out.path().join("index.fst"), out.path().join("records.bin")).unwrap();
+    assert_eq!(idx.len(), 2);
+    assert_eq!(idx.suggest_geo("par", 8).unwrap()[0].name, "Paris");
+}
+
+#[test]
+fn cli_empty_keys_column_defaults_to_name() {
+    // Exactly 7 columns (no keys column) -> record is indexed under its name.
+    let tsv = "2950159\tBerlin\t52.5\t13.4\tDE\t3426354\tPPLC\n";
+    let (ok, _stderr, out) = run_build_index(tsv);
+    assert!(ok);
+    let idx =
+        Index::<Mmap>::open(out.path().join("index.fst"), out.path().join("records.bin")).unwrap();
+    assert_eq!(idx.suggest_geo("berl", 8).unwrap()[0].name, "Berlin");
+}
+
+#[test]
+fn cli_rejects_too_few_columns() {
+    let (ok, stderr, _out) = run_build_index("2950159\tBerlin\t52.5\n");
+    assert!(!ok, "should fail on a short line");
+    assert!(
+        stderr.contains("line 1"),
+        "stderr should point at the line: {stderr}"
+    );
+}
+
+#[test]
+fn cli_rejects_non_numeric_population() {
+    let (ok, stderr, _out) =
+        run_build_index("2950159\tBerlin\t52.5\t13.4\tDE\tlots\tPPLC\tBerlin\n");
+    assert!(!ok, "should fail on a non-numeric population");
+    assert!(
+        stderr.contains("population"),
+        "stderr should name the bad field: {stderr}"
+    );
+}
+
+#[test]
+fn cli_wrong_arg_count_is_usage_error() {
+    // No arguments -> usage error, distinct exit code 2.
+    let output = Command::new(env!("CARGO_BIN_EXE_build-index"))
+        .output()
+        .expect("run build-index");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("usage"));
+}
+
+#[test]
+fn open_missing_records_file_errors() {
+    let dir = tempdir().unwrap();
+    // Create only the fst, not records.bin.
+    let (fst, _records) = {
+        let mut b = IndexBuilder::new();
+        let r = b.add_record(geo(1, "X", "XX", 1).to_record());
+        b.add_key("x", r);
+        b.build().unwrap()
+    };
+    let fst_path = dir.path().join("index.fst");
+    std::fs::File::create(&fst_path)
+        .unwrap()
+        .write_all(&fst)
+        .unwrap();
+    assert!(Index::<Mmap>::open(&fst_path, dir.path().join("records.bin")).is_err());
+}
+
+// ----------------------------------------------------------------------------
 // A different domain: people / ФИО. Same engine, a domain-specific payload.
 // group = person id, rank = a relevance score, payload = "Surname|Department".
 // ----------------------------------------------------------------------------
@@ -179,4 +281,49 @@ fn people_index_is_just_another_adapter() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].group, 3);
     assert_eq!(decode_person(&hits[0]).1, "IT");
+}
+
+// ----------------------------------------------------------------------------
+// A third domain: products. Payload is a tiny "JSON-ish" string; several color
+// variants of one product share a group so they dedup to a single suggestion.
+// ----------------------------------------------------------------------------
+
+#[test]
+fn products_index_dedups_variants_and_ranks_by_sales() {
+    let mut b = IndexBuilder::new();
+
+    // Product 100: "Aero Runner" sneaker, two color variants, high sales.
+    let shoe = b.add_record(Record {
+        group: 100,
+        rank: 5000,
+        payload: br#"{"sku":"AR-1","title":"Aero Runner"}"#.to_vec(),
+    });
+    for k in [
+        "aero runner",
+        "aero runner black",
+        "aero runner white",
+        "aero",
+    ] {
+        b.add_key(&normalize(k), shoe);
+    }
+
+    // Product 200: "Aero Backpack", lower sales.
+    let bag = b.add_record(Record {
+        group: 200,
+        rank: 800,
+        payload: br#"{"sku":"AB-9","title":"Aero Backpack"}"#.to_vec(),
+    });
+    for k in ["aero backpack", "aero"] {
+        b.add_key(&normalize(k), bag);
+    }
+
+    let (fst, records) = b.build().unwrap();
+    let idx = Index::from_bytes(fst, records).unwrap();
+
+    // "aero" reaches both; higher sales first, each product once despite variants.
+    let hits = idx.suggest("aero", 8).unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].group, 100);
+    assert_eq!(hits[1].group, 200);
+    assert!(hits[0].payload.starts_with(br#"{"sku":"AR-1""#));
 }

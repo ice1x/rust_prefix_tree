@@ -414,6 +414,24 @@ This drops in behind `RustGeoIndex` (§5): the wrapper maps each row to a
 `GeoRecord`, keeping the `/geo/suggest` contract unchanged. A different domain skips
 `geo_unpack` and decodes its own payload bytes.
 
+### Tests
+
+```sh
+cargo test                       # Rust unit + integration (default, no Python)
+cargo clippy --all-targets --features python -- -D warnings
+
+# Python surface (needs the wheel installed; the pytest fixtures build the
+# artifacts via the build-index CLI, so a Rust toolchain must be on PATH):
+maturin develop --features python   # or: pip install the built wheel
+pytest tests/python
+```
+
+Coverage spans normalization (incl. NFKD compatibility, mixed separators),
+the `records.bin` reader (truncation, postings, binary/edge payloads), the
+builder (postings grouping, key sort/dedup, unicode keys), `suggest` (ranking,
+tiebreak, dedup, mmap open, misses), the geo adapter, the `build-index` CLI
+error paths, and three domains end-to-end (geo, people/ФИО, products).
+
 ### Not yet built
 
 Fuzzy / Levenshtein matching (§4), the Docker multi-stage prod build (§8), and the

@@ -204,4 +204,100 @@ mod tests {
         assert!(idx.suggest("zzz", 10).unwrap().is_empty());
         assert!(idx.suggest("ber", 0).unwrap().is_empty());
     }
+
+    #[test]
+    fn len_and_is_empty() {
+        assert_eq!(sample().len(), 4);
+        assert!(!sample().is_empty());
+
+        let (fst, records) = IndexBuilder::new().build().unwrap();
+        let empty = Index::from_bytes(fst, records).unwrap();
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+        assert!(empty.suggest("anything", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn equal_rank_tiebreaks_on_payload_asc() {
+        let mut b = IndexBuilder::new();
+        // Same rank; deterministic order must be by payload bytes ascending.
+        let beta = b.add_record(rec(1, 100, "Beta"));
+        let alpha = b.add_record(rec(2, 100, "Alpha"));
+        b.add_key("x", beta);
+        b.add_key("x", alpha);
+        let (fst, records) = b.build().unwrap();
+        let idx = Index::from_bytes(fst, records).unwrap();
+
+        let out = idx.suggest("x", 10).unwrap();
+        assert_eq!(payload(&out[0]), "Alpha");
+        assert_eq!(payload(&out[1]), "Beta");
+    }
+
+    #[test]
+    fn negative_ranks_order_descending() {
+        let mut b = IndexBuilder::new();
+        let low = b.add_record(rec(1, -100, "low"));
+        let high = b.add_record(rec(2, -1, "high"));
+        b.add_key("k", low);
+        b.add_key("k", high);
+        let (fst, records) = b.build().unwrap();
+        let idx = Index::from_bytes(fst, records).unwrap();
+
+        let out = idx.suggest("k", 10).unwrap();
+        // -1 > -100, so "high" comes first.
+        assert_eq!(payload(&out[0]), "high");
+        assert_eq!(payload(&out[1]), "low");
+    }
+
+    #[test]
+    fn limit_larger_than_results_returns_all() {
+        let idx = sample();
+        let out = idx.suggest("ber", 999).unwrap();
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn unicode_prefix_query() {
+        let mut b = IndexBuilder::new();
+        let r = b.add_record(rec(1, 1, "Zürich"));
+        b.add_key(&crate::normalize::normalize("Zürich"), r);
+        let (fst, records) = b.build().unwrap();
+        let idx = Index::from_bytes(fst, records).unwrap();
+
+        // Query with accents + case; folds to the same key.
+        assert_eq!(idx.suggest("zür", 10).unwrap().len(), 1);
+        assert_eq!(idx.suggest("ZURI", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn open_from_mmap_matches_from_bytes() {
+        use std::io::Write;
+        let mut b = IndexBuilder::new();
+        let r = b.add_record(rec(7, 5, "Berlin"));
+        b.add_key("berlin", r);
+        let (fst, records) = b.build().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let fst_path = dir.path().join("index.fst");
+        let rec_path = dir.path().join("records.bin");
+        std::fs::File::create(&fst_path)
+            .unwrap()
+            .write_all(&fst)
+            .unwrap();
+        std::fs::File::create(&rec_path)
+            .unwrap()
+            .write_all(&records)
+            .unwrap();
+
+        let idx = Index::<Mmap>::open(&fst_path, &rec_path).unwrap();
+        let out = idx.suggest("berl", 10).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].group, 7);
+        assert_eq!(payload(&out[0]), "Berlin");
+    }
+
+    #[test]
+    fn open_missing_file_errors() {
+        assert!(Index::<Mmap>::open("/nonexistent/index.fst", "/nonexistent/records.bin").is_err());
+    }
 }
