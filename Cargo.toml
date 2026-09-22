@@ -3,10 +3,23 @@ name = "geo_trie_rs"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
-description = "Memory-mapped, fst-backed geo autocomplete index for the reviews service, exposed to Python via PyO3."
+description = "Memory-mapped, fst-backed geo autocomplete index with optional fuzzy matching, exposed to Python via PyO3."
 license = "Apache-2.0"
 repository = "https://github.com/ice1x/rust_prefix_tree"
 readme = "README.md"
+keywords = ["autocomplete", "trie", "fst", "geo", "prefix"]
+categories = ["data-structures", "text-processing"]
+# Ship only the crate sources and Rust tests; keep IDE, Docker, CI, pytest
+# caches and the maturin/Python packaging out. Anchored to the crate root so
+# stray README.md / pyc files elsewhere are not swept in.
+include = [
+    "/src/**/*",
+    "/tests/*.rs",
+    "/tests/fixtures/**/*",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE",
+]
 
 # cdylib -> the PyO3 extension module (built with maturin).
 # rlib   -> lets `cargo test`, benches and the `build-index` binary link the core.
