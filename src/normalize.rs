@@ -1,9 +1,8 @@
-//! Key normalization for the geo index.
+//! Opt-in Unicode key normalization (enabled by the `normalize` feature).
 //!
-//! This mirrors the Python `normalize()` contract used by the pure-Python trie so
-//! that index-build folding and query folding agree exactly (see README §5, §10).
-//! Each character (after NFKD) falls into exactly one of three classes, matching
-//! the Python normalizer's `_SEPARATORS = " -.,()/"`:
+//! Pass [`normalize`] to [`crate::Trie::with_normalizer`] so that insert-time and
+//! query-time folding agree exactly. Each character (after NFKD) falls into exactly
+//! one of three classes, matching a conventional separator set `" -.,()/"`:
 //!
 //! 1. NFKD decomposition,
 //! 2. drop combining marks (accents/diacritics),
