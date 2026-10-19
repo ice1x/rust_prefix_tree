@@ -3,18 +3,17 @@ requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "geo_trie_rs"
-version = "0.1.0"
-description = "Memory-mapped, fst-backed geo autocomplete index for the reviews service, exposed via PyO3."
-readme = "README.md"
+name = "metatrie"
+description = "Prefix-tree autocomplete index with metadata records (Rust/PyO3)."
 requires-python = ">=3.9"
-license = { file = "LICENSE" }
+license = { text = "Apache-2.0" }
 classifiers = [
     "Programming Language :: Rust",
-    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
 ]
+dynamic = ["version"]
 
 [tool.maturin]
-# Build the PyO3 extension module; the pure-Rust default build stays Python-free.
+# Build the PyO3 extension module (the `python` Cargo feature) as an abi3 wheel.
 features = ["python"]
-# abi3 wheel -> one wheel works across CPython >= 3.9 (README §8).

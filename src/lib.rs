@@ -1,32 +1,53 @@
-//! `geo_trie_rs` — a memory-mapped, `fst`-backed prefix-autocomplete index.
+//! `metatrie` — a prefix-tree (trie) autocomplete index whose nodes carry
+//! **metadata records**.
 //!
-//! Despite the name, the engine is **domain-agnostic**: it maps normalized string
-//! keys to neutral [`records::Record`]s (`group` dedup key, `rank` sort weight,
-//! opaque `payload` bytes). Geo is one adapter over it ([`geo`]); a people/ФИО or
-//! product index is just a different adapter — the core is unchanged.
+//! It is the Rust member of a small family of hand-written prefix trees
+//! ([Python `ice1x/prefix_tree`](https://github.com/ice1x/prefix_tree),
+//! [Go `ice1x/go-prefix-trie`](https://github.com/ice1x/go-prefix-trie)): the same
+//! insert / prefix-collect / field-query / sort-by-field semantics, ported to Rust
+//! and extended with deletion, O(1) count, and optional typo-tolerant fuzzy search.
 //!
-//! It is the Rust backend proposed in the repo README: it replaces the pure-Python
-//! dict trie behind the `reviews` service's `/geo/suggest` endpoint with a compact,
-//! memory-mapped [`fst::Map`] index plus a parallel records blob.
+//! Two layers:
+//! * [`Trie<V>`] — the generic, dependency-free prefix tree: `insert` (appends),
+//!   `get`, `get_by_prefix`, `has_prefix`, `delete` (prunes), `update`, `count`,
+//!   `clear`, and `get_by_prefix_fuzzy`.
+//! * The [`Record`] layer — for `Trie<Record>` (a node holds a list of
+//!   `Record = map of String -> Value`), adds the dynamic, runtime-keyed queries:
+//!   [`Trie::get_by_prefix_and_query`], [`Trie::get_by_word_and_query`],
+//!   [`Trie::get_by_prefix_sort_by`] and [`Trie::get_by_prefix_sort_desc_by`].
 //!
-//! Two artifacts are produced offline and mmapped at run time:
-//! * `index.fst`   — normalized key → postings-index (see [`builder`], [`index`]),
-//! * `records.bin` — postings + neutral per-item records (see [`records`]).
+//! Keys are stored verbatim by default; call [`Trie::with_normalizer`] (e.g. with the
+//! feature-gated [`normalize`]) for case/diacritic folding. The trie does no internal
+//! locking — it is `Send + Sync` when `V` is; wrap it in a `RwLock`/`Mutex` to share.
 //!
-//! The core (build + query + normalization) is pure Rust and fully unit-tested.
-//! The optional `python` feature adds a PyO3 extension module of the same name.
+//! ```
+//! use metatrie::{Trie, Record, Value, Order};
+//!
+//! let mut trie: Trie<Record> = Trie::new();
+//! let mut r = Record::new();
+//! r.insert("city".into(), Value::from("Berlin"));
+//! r.insert("population".into(), Value::from(3_600_000_i64));
+//! trie.insert("berlin", r).unwrap();
+//!
+//! assert!(trie.has_prefix("ber"));
+//! let hits = trie.get_by_prefix_sort_by("ber", "population", Order::Desc);
+//! assert_eq!(hits.len(), 1);
+//! ```
 
-pub mod builder;
-pub mod geo;
-pub mod index;
-pub mod normalize;
-pub mod records;
+mod fuzzy;
+mod record;
+mod trie;
+mod value;
 
-pub use builder::IndexBuilder;
-pub use geo::GeoRecord;
-pub use index::Index;
-pub use normalize::normalize;
-pub use records::{Record, RecordStore};
+#[cfg(feature = "normalize")]
+mod normalize;
 
 #[cfg(feature = "python")]
 mod python;
+
+pub use fuzzy::MAX_EDITS;
+pub use trie::{Order, Trie, TrieError};
+pub use value::{Record, Value};
+
+#[cfg(feature = "normalize")]
+pub use normalize::normalize;
