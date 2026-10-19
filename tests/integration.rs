@@ -30,8 +30,11 @@ fn city_autocomplete_ranked_and_fuzzy() {
         ("solnechnogorsk", "Solnechnogorsk", 52_798),
     ];
     for (key, name, pop) in cities {
-        trie.insert(key, rec(&[("name", name.into()), ("population", pop.into())]))
-            .unwrap();
+        trie.insert(
+            key,
+            rec(&[("name", name.into()), ("population", pop.into())]),
+        )
+        .unwrap();
     }
 
     // Prefix "ber" → Berlin, Bergen, Bern ranked by population desc.
@@ -95,10 +98,8 @@ fn issue_title_autocomplete_filtered_by_metadata() {
     assert_eq!(oh, vec!["login fails on safari"]);
 
     // Resolve one exact issue by title + a metadata constraint.
-    let one = trie.get_by_word_and_query(
-        "login redirect loop",
-        &rec(&[("priority", "high".into())]),
-    );
+    let one =
+        trie.get_by_word_and_query("login redirect loop", &rec(&[("priority", "high".into())]));
     assert_eq!(one.and_then(|r| field(r, "status")), Some("closed"));
 }
 
