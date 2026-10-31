@@ -1,56 +1,44 @@
 [package]
-name = "geo_trie_rs"
+name = "metatrie"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
-description = "Memory-mapped, fst-backed geo autocomplete index with optional fuzzy matching, exposed to Python via PyO3."
+description = "A prefix-tree (trie) autocomplete index whose nodes carry metadata records, with prefix collection, field queries, sort-by-field and optional typo-tolerant fuzzy search. Exposable to Python via PyO3."
 license = "Apache-2.0"
 repository = "https://github.com/ice1x/rust_prefix_tree"
 readme = "README.md"
-keywords = ["autocomplete", "trie", "fst", "geo", "prefix"]
+keywords = ["trie", "autocomplete", "typeahead", "prefix", "fuzzy"]
 categories = ["data-structures", "text-processing"]
-# Ship only the crate sources and Rust tests; keep IDE, Docker, CI, pytest
-# caches and the maturin/Python packaging out. Anchored to the crate root so
-# stray README.md / pyc files elsewhere are not swept in.
+# Ship only crate sources, Rust tests, Cargo.toml, README and LICENSE.
 include = [
     "/src/**/*",
     "/tests/*.rs",
-    "/tests/fixtures/**/*",
     "/Cargo.toml",
     "/README.md",
     "/LICENSE",
 ]
 
-# cdylib -> the PyO3 extension module (built with maturin).
-# rlib   -> lets `cargo test`, benches and the `build-index` binary link the core.
+# rlib  -> normal Rust library (tests, benches, downstream crates).
+# cdylib -> the PyO3 extension module, built only with the `python` feature.
 [lib]
-name = "geo_trie_rs"
+name = "metatrie"
 crate-type = ["cdylib", "rlib"]
 
-[[bin]]
-name = "build-index"
-path = "src/bin/build_index.rs"
-
 [features]
-# Default build is pure Rust so `cargo test` / `cargo clippy` need no Python.
+# Pure Rust, zero dependencies by default.
 default = []
-# Enable the PyO3 extension module (used by maturin).
+# Opt-in Unicode key normalization (NFKD + case/diacritic folding).
+normalize = ["dep:unicode-normalization"]
+# PyO3 extension module exposing the Record-based trie to Python.
 python = ["dep:pyo3"]
 
 [dependencies]
-# Fuzzy matching is implemented in-crate (char-level, Unicode-safe); fst's own
-# Levenshtein automaton is byte-oriented and mis-handles non-ASCII, so it's unused.
-fst = "0.4"
-memmap2 = "0.9"
-unicode-normalization = "0.1"
+unicode-normalization = { version = "0.1", optional = true }
 
 [dependencies.pyo3]
 version = "0.22"
 features = ["extension-module", "abi3-py39"]
 optional = true
-
-[dev-dependencies]
-tempfile = "3"
 
 [profile.release]
 lto = true
