@@ -13,7 +13,7 @@ env:
 jobs:
   lint:
     name: 1 · lint (fmt + clippy)
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -32,7 +32,7 @@ jobs:
   test:
     name: 2 · test (unit + integration + doctests)
     needs: lint
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +45,7 @@ jobs:
   wheel:
     name: 3 · wheel (maturin → pytest)
     needs: test
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
