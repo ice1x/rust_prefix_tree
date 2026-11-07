@@ -4,17 +4,10 @@ A prefix-tree (trie) autocomplete index whose nodes carry **metadata records** â
 not just keys. Give it words with attached data; get back prefix suggestions you can
 filter by field, sort by field, and match with typo tolerance.
 
-It is the Rust member of a small family of hand-written prefix trees:
-[Python `ice1x/prefix_tree`](https://github.com/ice1x/prefix_tree) and
-[Go `ice1x/go-prefix-trie`](https://github.com/ice1x/go-prefix-trie). Same core
-semantics (insert / prefix-collect / field-query / sort-by-field), ported to Rust and
-extended with deletion (with node pruning), O(1) count, and optional fuzzy search.
-
 > **Scope, honestly.** This is a plain character trie (one node per `char`), not a
 > compressed/radix/FST structure â€” it does not aim to beat crates like `fst`,
 > `radix_trie` or `patricia_tree` on raw speed or memory. Its reason to exist is the
-> *bundled autocomplete ergonomics* (metadata records + field queries + sort + fuzzy)
-> and API parity across the Python/Go/Rust family.
+> *bundled autocomplete ergonomics*: metadata records + field queries + sort + fuzzy.
 
 ## Two layers
 
@@ -78,8 +71,7 @@ The **default build has zero dependencies**.
 ## Ordering note
 
 Child edges are a `BTreeMap<char, _>`, so `get_by_prefix` returns payloads in a
-deterministic, sorted-by-`char` order. This differs from the Python family's
-dict-insertion order and the Go family's randomized map order; use
+deterministic order, sorted by `char`. It is not insertion order; use
 `get_by_prefix_sort_by` whenever you need a specific order.
 
 ## License
