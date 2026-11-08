@@ -1,5 +1,9 @@
 # metatrie
 
+[![crates.io](https://img.shields.io/crates/v/metatrie.svg)](https://crates.io/crates/metatrie)
+[![docs.rs](https://img.shields.io/docsrs/metatrie)](https://docs.rs/metatrie)
+[![license](https://img.shields.io/crates/l/metatrie.svg)](#license)
+
 A prefix-tree (trie) autocomplete index whose nodes carry **metadata records** —
 not just keys. Give it words with attached data; get back prefix suggestions you can
 filter by field, sort by field, and match with typo tolerance.
